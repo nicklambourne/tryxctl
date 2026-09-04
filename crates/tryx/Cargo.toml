@@ -13,6 +13,7 @@ owo-colors = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tryx-device = { path = "../tryx-device" }
+tryx-legacy = { path = "../tryx-legacy" }
 which = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

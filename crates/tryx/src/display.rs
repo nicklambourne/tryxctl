@@ -1,0 +1,33 @@
+use crate::exit::{self, CommandResult, Failure};
+use crate::legacy;
+use serde_json::json;
+
+pub fn set(json: bool, tty: Option<&str>, brightness: Option<u8>) -> CommandResult {
+    let Some(brightness) = brightness else {
+        return Err(Failure::usage("nothing to set; pass --brightness <0-100>"));
+    };
+    let target = legacy::select(tty)?;
+    let mut client = legacy::open(&target)?;
+    let response = client.set_brightness(brightness)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "tty": target.tty,
+                "command": "brightness",
+                "value": brightness,
+                "status": response.status,
+                "body": response.body,
+                "checksum_ok": response.checksum_ok,
+            }))?
+        );
+    } else {
+        let status = if response.status.is_empty() {
+            "acknowledged".to_string()
+        } else {
+            response.status
+        };
+        println!("Brightness set to {brightness} ({status})");
+    }
+    Ok(exit::ok())
+}

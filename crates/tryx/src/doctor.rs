@@ -24,6 +24,7 @@ pub fn run(json: bool) -> anyhow::Result<ExitCode> {
     let mut checks = Vec::new();
     check_ffmpeg(&mut checks);
     check_ffprobe(&mut checks);
+    check_adb(&mut checks);
     check_permissions(&mut checks);
     check_devices(&mut checks);
 
@@ -123,22 +124,34 @@ fn check_ffprobe(checks: &mut Vec<Check>) {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn check_permissions(checks: &mut Vec<Check>) {
-    match find_udev_rule() {
-        Some(path) => checks.push(check(
-            "udev rule",
-            Status::Ok,
-            format!("{} covers vendor 391a", path.display()),
-            None,
-        )),
-        None => checks.push(check(
-            "udev rule",
+fn check_adb(checks: &mut Vec<Check>) {
+    match which::which("adb") {
+        Ok(path) => checks.push(check("adb", Status::Ok, path.display().to_string(), None)),
+        Err(_) => checks.push(check(
+            "adb",
             Status::Warn,
-            "no udev rule mentions vendor 391a",
-            Some("Copy packaging/udev/*.rules into /etc/udev/rules.d and replug the display."),
+            "not found on PATH; needed to transfer media on the legacy cm01 firmware",
+            Some("Install android-tools (the nix shell provides it on Linux)."),
         )),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn check_permissions(checks: &mut Vec<Check>) {
+    push_udev_check(
+        checks,
+        "udev rule (printer-class)",
+        &["391a"],
+        "vendor 391a",
+        "Copy packaging/udev/70-tryx-access.rules and 99-tryx-printer.rules into /etc/udev/rules.d and replug the display.",
+    );
+    push_udev_check(
+        checks,
+        "udev rule (legacy cm01)",
+        &["cm01", "18d1"],
+        "the legacy cm01 device",
+        "Copy packaging/udev/71-tryx-legacy.rules into /etc/udev/rules.d and replug the display; adb needs it.",
+    );
     push_group_check(
         checks,
         "lp group",
@@ -151,6 +164,36 @@ fn check_permissions(checks: &mut Vec<Check>) {
         &["dialout", "uucp"],
         "the legacy firmware's /dev/ttyACM* command port",
     );
+    push_group_check(
+        checks,
+        "plugdev group",
+        &["plugdev"],
+        "the legacy udev rule's ADB access without a seat ACL",
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn push_udev_check(
+    checks: &mut Vec<Check>,
+    name: &str,
+    needles: &[&str],
+    subject: &str,
+    hint: &str,
+) {
+    match find_udev_rule(needles) {
+        Some(path) => checks.push(check(
+            name,
+            Status::Ok,
+            format!("{} covers {subject}", path.display()),
+            None,
+        )),
+        None => checks.push(check(
+            name,
+            Status::Warn,
+            format!("no udev rule mentions {subject}"),
+            Some(hint),
+        )),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -197,7 +240,7 @@ fn user_in_any_group(names: &[&str]) -> anyhow::Result<Option<String>> {
 }
 
 #[cfg(target_os = "linux")]
-fn find_udev_rule() -> Option<std::path::PathBuf> {
+fn find_udev_rule(needles: &[&str]) -> Option<std::path::PathBuf> {
     const RULE_DIRS: [&str; 4] = [
         "/etc/udev/rules.d",
         "/run/udev/rules.d",
@@ -215,7 +258,9 @@ fn find_udev_rule() -> Option<std::path::PathBuf> {
             .collect();
         paths.sort();
         for path in paths {
-            if std::fs::read_to_string(&path).is_ok_and(|text| text.contains("391a")) {
+            if std::fs::read_to_string(&path)
+                .is_ok_and(|text| needles.iter().any(|needle| text.contains(needle)))
+            {
                 return Some(path);
             }
         }
@@ -225,7 +270,13 @@ fn find_udev_rule() -> Option<std::path::PathBuf> {
 
 #[cfg(not(target_os = "linux"))]
 fn check_permissions(checks: &mut Vec<Check>) {
-    for name in ["udev rule", "lp group", "serial group"] {
+    for name in [
+        "udev rule (printer-class)",
+        "udev rule (legacy cm01)",
+        "lp group",
+        "serial group",
+        "plugdev group",
+    ] {
         checks.push(check(name, Status::Skip, "Linux only", None));
     }
 }

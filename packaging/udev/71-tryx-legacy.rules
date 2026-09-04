@@ -1,0 +1,6 @@
+# Displays still on the legacy cm01 firmware enumerate as an Android Open
+# Accessory device from rockchip (18d1:2d04 or 18d1:2d05). Grant the plugdev
+# group and the active seat access to the USB device so adb can claim its ADB
+# interface. The serial command port is already owned by the dialout group.
+
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="18d1", ATTR{manufacturer}=="rockchip", ATTR{product}=="cm01*", MODE="0660", GROUP="plugdev", TAG+="uaccess"

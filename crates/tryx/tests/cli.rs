@@ -37,3 +37,34 @@ fn doctor_json_reports_checks_and_matches_exit_status() {
         assert_eq!(output.status.code(), Some(4));
     }
 }
+
+#[test]
+fn info_on_a_missing_port_is_a_device_failure() {
+    let output = tryx()
+        .args(["info", "--tty", "/nonexistent/ttyTRYX"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("/nonexistent/ttyTRYX"), "{stderr}");
+}
+
+#[test]
+fn display_set_without_a_setting_is_a_usage_error() {
+    let output = tryx().args(["display", "set"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--brightness"));
+}
+
+#[test]
+fn media_ls_needs_adb_and_a_display() {
+    let output = tryx()
+        .args(["media", "ls", "--tty", "/nonexistent/ttyTRYX"])
+        .output()
+        .unwrap();
+    // 4 without adb installed, 3 when adb runs but sees no display.
+    assert!(
+        matches!(output.status.code(), Some(3) | Some(4)),
+        "{output:?}"
+    );
+}

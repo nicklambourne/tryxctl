@@ -1,0 +1,157 @@
+//! The CDC ACM command channel: 115200 baud, 8N1, raw, no flow control.
+
+use crate::LegacyError;
+use crate::frame::{self, Response};
+use std::io::{ErrorKind, Read, Write};
+use std::time::{Duration, Instant};
+
+pub const BAUD_RATE: u32 = 115_200;
+/// How long a reply may take. Upstream pauses 100 ms and then reads for
+/// 500 ms; a single deadline is simpler and more tolerant.
+pub const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_millis(1000);
+const READ_SLICE: Duration = Duration::from_millis(50);
+
+pub struct SerialLink {
+    port: Box<dyn serialport::SerialPort>,
+    path: String,
+    sequence: u32,
+    pub response_timeout: Duration,
+}
+
+impl SerialLink {
+    pub fn open(path: &str) -> Result<Self, LegacyError> {
+        let serial_error = |source| LegacyError::Serial {
+            path: path.to_string(),
+            source,
+        };
+        let port = serialport::new(path, BAUD_RATE)
+            .data_bits(serialport::DataBits::Eight)
+            .parity(serialport::Parity::None)
+            .stop_bits(serialport::StopBits::One)
+            .flow_control(serialport::FlowControl::None)
+            .timeout(READ_SLICE)
+            .open()
+            .map_err(serial_error)?;
+        port.clear(serialport::ClearBuffer::All)
+            .map_err(serial_error)?;
+        Ok(Self::from_port(port, path))
+    }
+
+    /// Wraps an already open port, for example one half of a pty pair.
+    pub fn from_port(mut port: Box<dyn serialport::SerialPort>, path: &str) -> Self {
+        // Ignore a refused timeout: reads then block at most for the port's
+        // own timeout, and the deadline loop still bounds the wait.
+        let _ = port.set_timeout(READ_SLICE);
+        SerialLink {
+            port,
+            path: path.to_string(),
+            sequence: 0,
+            response_timeout: DEFAULT_RESPONSE_TIMEOUT,
+        }
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Sends `POST <command>` and waits for the reply.
+    pub fn request(&mut self, command: &str, content: &str) -> Result<Response, LegacyError> {
+        self.send(command, content)?;
+        self.read_response(command)
+    }
+
+    /// Sends `POST <command>` without waiting for a reply.
+    pub fn send(&mut self, command: &str, content: &str) -> Result<(), LegacyError> {
+        self.sequence += 1;
+        let bytes = frame::build_frame("POST", command, content, "1", self.sequence)?;
+        self.port.write_all(&bytes)?;
+        self.port.flush()?;
+        Ok(())
+    }
+
+    fn read_response(&mut self, command: &str) -> Result<Response, LegacyError> {
+        let deadline = Instant::now() + self.response_timeout;
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 256];
+        while Instant::now() < deadline {
+            match self.port.read(&mut chunk) {
+                Ok(0) => {}
+                Ok(count) => {
+                    buffer.extend_from_slice(&chunk[..count]);
+                    if let Some(bytes) = frame::take_frame(&mut buffer) {
+                        return frame::parse_response(&bytes).ok_or_else(|| {
+                            LegacyError::MalformedResponse {
+                                command: command.to_string(),
+                            }
+                        });
+                    }
+                }
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(LegacyError::NoResponse {
+            command: command.to_string(),
+            timeout_ms: self.response_timeout.as_millis() as u64,
+        })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use serialport::{SerialPort, TTYPort};
+
+    fn pair() -> (TTYPort, SerialLink) {
+        let (mut master, slave) = TTYPort::pair().expect("pty pair");
+        master
+            .set_timeout(Duration::from_millis(2000))
+            .expect("master timeout");
+        (master, SerialLink::from_port(Box::new(slave), "pty"))
+    }
+
+    #[test]
+    fn request_round_trips_through_a_pty_pair() {
+        let (mut device, mut link) = pair();
+        let device_side = std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let mut chunk = [0u8; 256];
+            let request = loop {
+                let count = device.read(&mut chunk).expect("device read");
+                buffer.extend_from_slice(&chunk[..count]);
+                if let Some(bytes) = frame::take_frame(&mut buffer) {
+                    break frame::parse_response(&bytes).expect("request parses");
+                }
+            };
+            let reply = frame::wrap(b"1 OK\r\nContentType=json\r\n\r\n{\"productId\":\"cm01_se\"}")
+                .unwrap();
+            device.write_all(&reply).expect("device write");
+            request
+        });
+
+        let response = link.request("conn", "").expect("response");
+        assert_eq!(response.status, "OK");
+        assert_eq!(response.json.unwrap()["productId"], "cm01_se");
+
+        let request = device_side.join().unwrap();
+        assert_eq!(request.version, "POST");
+        assert_eq!(request.status, "conn");
+        assert!(request.raw.contains("AckNumber=1\r\n"), "{}", request.raw);
+        assert!(request.checksum_ok);
+    }
+
+    /// macOS's `poll()` reports a pty slave readable when it is not, so a
+    /// read with no peer data blocks forever there. Real serial devices are
+    /// unaffected; the test runs where ptys behave.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn request_times_out_without_a_reply() {
+        let (_device, mut link) = pair();
+        link.response_timeout = Duration::from_millis(150);
+        let started = Instant::now();
+        let error = link.request("conn", "").unwrap_err();
+        assert!(matches!(error, LegacyError::NoResponse { .. }), "{error}");
+        assert!(started.elapsed() >= Duration::from_millis(150));
+    }
+}
