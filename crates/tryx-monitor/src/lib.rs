@@ -6,11 +6,11 @@
 //! DXVSI/Tryx-Linux-GUI `src/systemmonitor.cpp` (AMD hwmon and amdgpu sysfs)
 //! plus `nvidia-smi` for NVIDIA cards.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CpuSample {
     pub name: Option<String>,
     pub temperature_c: Option<f64>,
@@ -19,7 +19,7 @@ pub struct CpuSample {
     pub power_w: Option<f64>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct GpuSample {
     pub name: Option<String>,
     pub temperature_c: Option<f64>,
@@ -28,20 +28,20 @@ pub struct GpuSample {
     pub power_w: Option<f64>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MemorySample {
     pub usage_percent: Option<f64>,
     pub total_bytes: Option<u64>,
     pub used_bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DiskSample {
     pub temperature_c: Option<f64>,
     pub usage_percent: Option<f64>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Sample {
     pub cpu: CpuSample,
     pub gpu: GpuSample,

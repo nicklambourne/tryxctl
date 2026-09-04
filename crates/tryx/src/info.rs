@@ -3,25 +3,20 @@ use crate::{legacy, output};
 use serde_json::json;
 
 pub fn run(json: bool, session: &legacy::Session) -> CommandResult {
-    let target = session.select()?;
-    let mut client = session.open(&target)?;
-    let info = client.handshake()?;
+    let mut connection = session.connect()?;
+    let info = connection.info()?;
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "transport": "legacy-serial",
-                "tty": target.tty,
-                "usb": target.device,
+                "via": connection.via(),
+                "tty": connection.tty(),
                 "device": info,
             }))?
         );
         return Ok(exit::ok());
     }
-    let port = match &target.device {
-        Some(device) => format!("{} ({})", target.tty, device.id),
-        None => target.tty.clone(),
-    };
     print!(
         "{}",
         output::key_values(&[
@@ -32,7 +27,10 @@ pub fn run(json: bool, session: &legacy::Session) -> CommandResult {
             ("OS", info.os),
             ("Serial", info.serial),
             ("Attributes", info.attributes.join(", ")),
-            ("Port", port),
+            (
+                "Via",
+                format!("{} ({})", connection.via(), connection.tty())
+            ),
         ])
     );
     Ok(exit::ok())

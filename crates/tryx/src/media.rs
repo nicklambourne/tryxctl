@@ -425,7 +425,7 @@ pub fn connect_adb(target: &DeviceTarget) -> Result<(Adb, String), Failure> {
 }
 
 pub fn ls(json: bool, session: &legacy::Session) -> CommandResult {
-    let target = session.select()?;
+    let target = session.select_direct()?;
     let (adb, serial) = connect_adb(&target)?;
     let files = adb.list_media()?;
     let storage = adb.free_space()?;
@@ -512,7 +512,7 @@ pub fn upload(
     }
 
     // Fail on device problems before spending time on ffmpeg.
-    let target = session.select()?;
+    let target = session.select_direct()?;
     let (adb, _) = connect_adb(&target)?;
     let existing = adb.list_media()?;
     if existing.iter().any(|entry| entry.name == plan.name) && !replace {
@@ -573,7 +573,7 @@ pub fn upload(
 
 fn push_and_show(
     session: &legacy::Session,
-    target: &DeviceTarget,
+    _target: &DeviceTarget,
     adb: &Adb,
     plan: &Plan,
     staged: &Path,
@@ -594,8 +594,8 @@ fn push_and_show(
     if show {
         let mut saved = crate::state::load();
         saved.screen.media = vec![plan.name.clone()];
-        let mut client = session.open(target)?;
-        legacy::apply_screen(&mut client, &mut saved)?;
+        let mut connection = session.connect()?;
+        connection.apply(&mut saved)?;
         if let Err(error) = crate::state::save(&saved) {
             eprintln!("warning: could not save the display state: {error}");
         }
@@ -607,7 +607,7 @@ pub fn rm(json: bool, session: &legacy::Session, names: &[String]) -> CommandRes
     if let Some(name) = names.iter().find(|name| !is_safe_media_name(name)) {
         return Err(Failure::usage(format!("media name {name:?} is not safe")));
     }
-    let target = session.select()?;
+    let target = session.select_direct()?;
     let (adb, _) = connect_adb(&target)?;
     let existing = adb.list_media()?;
     if let Some(name) = names
@@ -616,11 +616,11 @@ pub fn rm(json: bool, session: &legacy::Session, names: &[String]) -> CommandRes
     {
         return Err(Failure::media(format!("{name} is not on the display")));
     }
-    let mut client = session.open(&target)?;
+    let mut connection = session.connect()?;
     let mut removed = Vec::new();
     for name in names {
         // The firmware deletes the file itself; adb only mops up if it did not.
-        client.delete_media(std::slice::from_ref(name))?;
+        connection.delete_media(std::slice::from_ref(name))?;
         adb.remove(name)?;
         removed.push(name.clone());
         if !json {

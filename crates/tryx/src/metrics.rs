@@ -7,7 +7,7 @@ use tryx_legacy::commands::{CpuInfo, DiskInfo, GpuInfo, MemoryInfo, PcInfo};
 use tryx_monitor::{Monitor, Sample};
 
 /// Overlay labels the legacy firmware understands, with CLI aliases.
-pub const LABELS: [(&str, &[&str]); 12] = [
+pub const LABELS: [(&str, &[&str]); 13] = [
     ("CPU Temperature", &["cpu-temp", "cpu-temperature"]),
     ("CPU Frequency", &["cpu-freq", "cpu-frequency"]),
     ("CPU Usage", &["cpu-usage", "cpu-load"]),
@@ -26,6 +26,7 @@ pub const LABELS: [(&str, &[&str]); 12] = [
         "Memory Utilization",
         &["mem-usage", "memory-usage", "memory-utilization"],
     ),
+    ("Date&Time", &["date-time", "datetime", "clock"]),
 ];
 /// The overlay shows at most this many labels.
 pub const MAX_LABELS: usize = 3;
@@ -108,7 +109,7 @@ fn parse_badges(text: &str) -> Result<Vec<String>, Failure> {
     Ok(badges)
 }
 
-fn require_linux() -> Result<(), Failure> {
+pub fn require_linux() -> Result<(), Failure> {
     if Monitor::supported() {
         Ok(())
     } else {
@@ -268,16 +269,14 @@ pub fn set(json: bool, session: &legacy::Session, args: &SetArgs) -> CommandResu
         "Celsius"
     };
     saved.temperature_unit = Some(unit.to_string());
-    let names = legacy::hardware_names(&mut saved);
+    legacy::hardware_names(&mut saved);
 
-    let target = session.select()?;
-    let mut client = session.open(&target)?;
-    client.send_spec(&names.0, &names.1)?;
-    client.set_temperature_unit(unit)?;
-    let response = legacy::apply_screen(&mut client, &mut saved)?;
-    if saved.screen.sysinfo_display.is_empty() {
-        client.set_sysinfo_display(&[])?;
-    }
+    let mut connection = session.connect()?;
+    let status = connection.apply(&mut saved)?;
+    let names = (
+        saved.cpu_name.clone().unwrap_or_default(),
+        saved.gpu_name.clone().unwrap_or_default(),
+    );
     if let Err(error) = state::save(&saved) {
         eprintln!("warning: could not save the display state: {error}");
     }
@@ -290,13 +289,13 @@ pub fn set(json: bool, session: &legacy::Session, args: &SetArgs) -> CommandResu
                 "cpu_name": names.0,
                 "gpu_name": names.1,
                 "temperature_unit": unit,
-                "status": response.status,
+                "status": status,
             }))?
         );
     } else {
         let labels = &saved.screen.sysinfo_display;
         if labels.is_empty() {
-            println!("Overlay cleared ({})", response.status);
+            println!("Overlay cleared ({status})");
         } else {
             println!(
                 "Overlay shows {} at {} {} in {} ({})",
@@ -304,7 +303,7 @@ pub fn set(json: bool, session: &legacy::Session, args: &SetArgs) -> CommandResu
                 saved.screen.settings.position.to_lowercase(),
                 saved.screen.settings.align.to_lowercase(),
                 saved.screen.settings.color,
-                response.status
+                status
             );
         }
         println!(
@@ -387,11 +386,16 @@ pub fn push(
     apply: bool,
 ) -> CommandResult {
     require_linux()?;
-    let target = session.select()?;
+    if !session.direct && crate::ipc::available() {
+        return Err(Failure::usage(
+            "the tryx daemon is running and already pushes metrics; see `tryx daemon status`",
+        ));
+    }
+    let target = session.select_direct()?;
     let mut client = session.open(&target)?;
     if apply {
-        // The display falls back to its built-in content when the host goes
-        // quiet, so restore the saved screen before the first sample.
+        // The display blanks when the host goes quiet, so restore the saved
+        // screen before the first sample.
         let mut saved = state::load();
         if !saved.screen.media.is_empty() {
             legacy::apply_screen(&mut client, &mut saved)?;
@@ -409,11 +413,15 @@ pub fn push(
     let mut monitor = Monitor::new();
     let mut sample = warm_sample(&mut monitor);
     loop {
-        client.send_sysinfo(&pc_info(&sample))?;
+        sample.timestamp_ms += tryx_legacy::local_utc_offset_ms();
+        let fans = client.send_sysinfo(&pc_info(&sample))?;
         if json {
-            println!("{}", serde_json::to_string(&sample)?);
+            println!(
+                "{}",
+                serde_json::to_string(&json!({"sample": sample, "fans": fans}))?
+            );
         } else if !quiet {
-            println!("{}", summary_line(&sample));
+            println!("{}{}", summary_line(&sample), fans_suffix(&fans));
         }
         if once {
             break;
@@ -424,111 +432,63 @@ pub fn push(
     Ok(exit::ok())
 }
 
-pub const SERVICE_NAME: &str = "tryx-metrics.service";
-
-fn user_unit_path() -> Result<std::path::PathBuf, Failure> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
-        })
-        .ok_or_else(|| Failure::environment("HOME is not set"))?;
-    Ok(base.join("systemd/user").join(SERVICE_NAME))
-}
-
-fn systemctl(args: &[&str]) -> Result<String, Failure> {
-    let output = std::process::Command::new("systemctl")
-        .arg("--user")
-        .args(args)
-        .output()
-        .map_err(|error| Failure::environment(format!("systemctl: {error}")))?;
-    if !output.status.success() {
-        return Err(Failure::environment(format!(
-            "systemctl --user {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+fn fans_suffix(fans: &tryx_legacy::FanStatus) -> String {
+    let mut parts = Vec::new();
+    if let Some(rpm) = fans.lcd_fan_rpm {
+        parts.push(format!("lcd fan {rpm} rpm"));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Writes and starts a systemd user service that keeps the overlay live.
-pub fn install(json: bool, interval: u64, tty: Option<&str>) -> CommandResult {
-    require_linux()?;
-    let binary = std::env::current_exe()
-        .map_err(|error| Failure::environment(format!("cannot locate this binary: {error}")))?;
-    if binary.components().any(|c| c.as_os_str() == "target") {
-        eprintln!(
-            "warning: the service will run {}, a development build; install a release binary and rerun",
-            binary.display()
-        );
+    if let Some(rpm) = fans.pump_rpm {
+        parts.push(format!("pump {rpm} rpm"));
     }
-    let unit = user_unit_path()?;
-    if let Some(parent) = unit.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tty_arg = tty.map(|t| format!(" --tty {t}")).unwrap_or_default();
-    let text = format!(
-        "[Unit]\nDescription=TRYX display metrics overlay\nDocumentation=https://github.com/nicklambourne/tryx-cli\n\n[Service]\nExecStart={} metrics push --interval {interval} --quiet{tty_arg}\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
-        binary.display()
-    );
-    std::fs::write(&unit, text)?;
-    systemctl(&["daemon-reload"])?;
-    systemctl(&["enable", "--now", SERVICE_NAME])?;
-    let linger = std::process::Command::new("loginctl")
-        .arg("enable-linger")
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
-                "unit": unit,
-                "binary": binary,
-                "interval": interval,
-                "linger": linger,
-            }))?
-        );
+    if parts.is_empty() {
+        String::new()
     } else {
-        println!(
-            "installed and started {} ({})",
-            SERVICE_NAME,
-            unit.display()
-        );
-        println!(
-            "{}",
-            if linger {
-                "lingering enabled: the service also runs while you are logged out"
-            } else {
-                "could not enable lingering; run `loginctl enable-linger` so it survives logout"
-            }
-        );
-        println!("check it with: systemctl --user status {SERVICE_NAME}");
+        format!(" · {}", parts.join(" · "))
     }
-    Ok(exit::ok())
 }
 
-pub fn uninstall(json: bool) -> CommandResult {
-    require_linux()?;
-    let unit = user_unit_path()?;
-    let _ = systemctl(&["disable", "--now", SERVICE_NAME]);
-    let removed = std::fs::remove_file(&unit).is_ok();
-    let _ = systemctl(&["daemon-reload"]);
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({"unit": unit, "removed": removed}))?
-        );
-    } else {
-        println!(
-            "{} {}",
-            if removed { "removed" } else { "no unit at" },
-            unit.display()
-        );
+/// `tryx fans`: read the fan tachometers, optionally set the LCD fan speed.
+pub fn fans(
+    json: bool,
+    session: &legacy::Session,
+    watch: Option<u64>,
+    lcd_speed: Option<u8>,
+) -> CommandResult {
+    let mut connection = session.connect()?;
+    if let Some(percent) = lcd_speed {
+        connection.fan_lcd(percent)?;
+        let mut saved = state::load();
+        saved.fan_lcd_percent = Some(percent);
+        if let Err(error) = state::save(&saved) {
+            eprintln!("warning: could not save the display state: {error}");
+        }
+        if !json {
+            println!("LCD fan set to a fixed {percent}%");
+        }
     }
-    Ok(exit::ok())
+    loop {
+        let fans = connection.fans()?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string(&json!({"via": connection.via(), "fans": fans}))?
+            );
+        } else {
+            let text = fans_suffix(&fans);
+            println!(
+                "{}",
+                if text.is_empty() {
+                    "no fan readings reported".to_string()
+                } else {
+                    text.trim_start_matches(" · ").to_string()
+                }
+            );
+        }
+        match watch {
+            Some(seconds) => thread::sleep(Duration::from_secs(seconds.max(1))),
+            None => return Ok(exit::ok()),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -14,15 +14,11 @@ pub fn run(
         serde_json::from_str::<serde_json::Value>(body)
             .map_err(|error| Failure::usage(format!("body is not JSON: {error}")))?;
     }
-    let target = session.select()?;
-    let mut client = session.open(&target)?;
+    let mut connection = session.connect()?;
     loop {
-        if no_wait {
-            client.link_mut().send(command, body)?;
-            println!("sent {command}");
-        } else {
-            let response = client.link_mut().request(command, body)?;
-            println!("{command}: {} {}", response.status, response.body);
+        match connection.raw(command, body, !no_wait)? {
+            Some((status, reply)) => println!("{command}: {status} {reply}"),
+            None => println!("sent {command}"),
         }
         match every {
             Some(seconds) => std::thread::sleep(std::time::Duration::from_secs(seconds.max(1))),

@@ -22,3 +22,21 @@ interchangeable between the two projects.
 
 Used only as a behavioural reference for the Turris 620 transfer path. No code
 is copied from it.
+
+## AfroSamuraiX/panorama-manager (MIT)
+
+<https://github.com/AfroSamuraiX/panorama-manager>
+
+Its hardware notes on the legacy firmware informed several features: the fan
+tachometer fields in the sysinfo reply, the `fanLCDSet` payload including the
+vendor app's default smart-mode curve (copied as data into
+`crates/tryx-legacy/src/commands.rs`), the `displayInSleep` and filter
+semantics, the local-time offset on the sysinfo timestamp, and the
+daemon-owns-the-port design.
+
+## fadli0029/reed-tpse (MIT)
+
+<https://github.com/fadli0029/reed-tpse>
+
+The original reverse engineering of the legacy `cm01` serial protocol and its
+keepalive, from which the DXVSI code we ported descends.

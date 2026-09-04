@@ -13,6 +13,8 @@ pub struct DisplayState {
     pub cpu_name: Option<String>,
     pub gpu_name: Option<String>,
     pub temperature_unit: Option<String>,
+    /// Fixed display-block fan speed last set, re-applied by the daemon.
+    pub fan_lcd_percent: Option<u8>,
 }
 
 pub fn path() -> Option<PathBuf> {
@@ -72,6 +74,7 @@ mod tests {
             cpu_name: Some("Ryzen".into()),
             gpu_name: None,
             temperature_unit: None,
+            fan_lcd_percent: None,
         };
         save_to(&file, &state).unwrap();
         assert_eq!(load_from(&file), state);

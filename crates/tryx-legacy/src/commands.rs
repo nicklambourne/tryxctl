@@ -18,7 +18,9 @@ pub struct DisplaySettings {
     pub align: String,
     /// `CPU Badge`, `GPU Badge`.
     pub badges: Vec<String>,
-    /// Overlay filter opacity, 0 to 100.
+    /// Firmware-rendered effect: empty, `Smoke`, or `Rain`.
+    pub filter: String,
+    /// Effect opacity, 0 to 100.
     pub filter_opacity: u32,
 }
 
@@ -29,6 +31,7 @@ impl Default for DisplaySettings {
             color: "#FFFFFF".to_string(),
             align: "Left".to_string(),
             badges: Vec::new(),
+            filter: String::new(),
             filter_opacity: 0,
         }
     }
@@ -54,6 +57,8 @@ pub struct ScreenConfig {
     pub settings2: DisplaySettings,
     pub sysinfo_display2: Vec<String>,
     pub waterfall_mode: bool,
+    /// Keep the panel lit while the host sleeps (`waterBlockScreen.displayInSleep`).
+    pub display_in_sleep: bool,
 }
 
 impl Default for ScreenConfig {
@@ -69,6 +74,7 @@ impl Default for ScreenConfig {
             settings2: DisplaySettings::default(),
             sysinfo_display2: Vec::new(),
             waterfall_mode: false,
+            display_in_sleep: false,
         }
     }
 }
@@ -80,7 +86,7 @@ fn settings_json(settings: &DisplaySettings) -> Value {
         "position": settings.position,
         "color": settings.color,
         "align": settings.align,
-        "filter": {"value": "", "opacity": settings.filter_opacity},
+        "filter": {"value": settings.filter, "opacity": settings.filter_opacity},
         "badges": settings.badges,
     })
 }
@@ -145,7 +151,7 @@ pub fn full_config(
         "temperature": temperature_unit,
         "waterBlockScreen": {
             "enable": true,
-            "displayInSleep": false,
+            "displayInSleep": config.display_in_sleep,
             "brightness": brightness,
             "waterfallMode": config.waterfall_mode,
             "id": Value::Object(screen),
@@ -183,6 +189,37 @@ pub fn brightness(value: u8) -> Value {
 
 pub fn media_delete(files: &[String]) -> Value {
     json!({"include": files})
+}
+
+/// Body of `POST fanLCDSet`: a fixed speed for the fan on the display block.
+/// The smart-mode curve is the vendor app's default, captured by
+/// AfroSamuraiX/panorama-manager (MIT); the firmware wants it present even in
+/// fixed mode.
+pub fn fan_lcd(percent: u8) -> Value {
+    json!({
+        "mode": "Fixed Mode",
+        "smartMode": [[0, 10], [28, 10], [48, 10], [61, 10], [75, 10], [77, 68], [79, 100], [100, 100]],
+        "fixedMode": percent.min(100),
+    })
+}
+
+/// The host's offset from UTC in milliseconds. The firmware renders the
+/// sysinfo timestamp without a timezone, so add this before sending it.
+// `tm_gmtoff` is a `c_long`, whose width depends on the platform.
+#[allow(clippy::useless_conversion)]
+pub fn local_utc_offset_ms() -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as libc::time_t)
+        .unwrap_or(0);
+    let mut local: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: localtime_r writes into the provided tm and reads a valid time_t.
+    let ok = unsafe { !libc::localtime_r(&now, &mut local).is_null() };
+    if ok {
+        i64::from(local.tm_gmtoff) * 1000
+    } else {
+        0
+    }
 }
 
 /// Live metrics for `POST all`, in the shape the firmware expects.
@@ -375,6 +412,33 @@ mod tests {
         assert_eq!(screen["brightness"], 60);
         assert_eq!(screen["id"]["Type"], "Pre-set");
         assert_eq!(screen["id"]["media"], json!(["a.mp4"]));
+    }
+
+    #[test]
+    fn fan_lcd_and_filter_and_sleep_bodies() {
+        let body = fan_lcd(140);
+        assert_eq!(body["mode"], "Fixed Mode");
+        assert_eq!(body["fixedMode"], 100);
+        assert_eq!(body["smartMode"].as_array().unwrap().len(), 8);
+        let config = ScreenConfig {
+            media: vec!["a.mp4".into()],
+            settings: DisplaySettings {
+                filter: "Smoke".into(),
+                filter_opacity: 80,
+                ..DisplaySettings::default()
+            },
+            display_in_sleep: true,
+            ..ScreenConfig::default()
+        };
+        assert_eq!(
+            screen_config(&config)["settings"]["filter"],
+            json!({"value": "Smoke", "opacity": 80})
+        );
+        assert_eq!(
+            full_config(&config, "c", "g", 50, "Celsius")["waterBlockScreen"]["displayInSleep"],
+            true
+        );
+        assert!(local_utc_offset_ms().abs() <= 14 * 3600 * 1000);
     }
 
     #[test]

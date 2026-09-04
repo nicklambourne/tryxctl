@@ -10,11 +10,11 @@ pub mod commands;
 pub mod frame;
 pub mod serial;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::thread;
 use std::time::Duration;
 
-pub use commands::{DisplaySettings, PcInfo, ScreenConfig};
+pub use commands::{DisplaySettings, PcInfo, ScreenConfig, local_utc_offset_ms};
 pub use frame::Response;
 pub use serial::SerialLink;
 
@@ -47,7 +47,7 @@ pub enum LegacyError {
 }
 
 /// Identity reported by the `conn` handshake.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceInfo {
     pub product_id: String,
     pub os: String,
@@ -56,6 +56,39 @@ pub struct DeviceInfo {
     pub firmware: String,
     pub hardware: String,
     pub attributes: Vec<String>,
+}
+
+/// Fan readings the firmware returns in reply to a sysinfo message.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FanStatus {
+    /// `status.fanLCD`: the fan on the display block.
+    pub lcd_fan_rpm: Option<u32>,
+    /// `status.turboPump`: reported by some models only.
+    pub pump_rpm: Option<u32>,
+}
+
+impl FanStatus {
+    /// Reads `status.fanLCD` and `status.turboPump`, each a number or a
+    /// string of digits depending on firmware.
+    pub fn from_json(json: &serde_json::Value) -> FanStatus {
+        let field = |name: &str| -> Option<u32> {
+            let value = json.get("status")?.get(name)?;
+            value
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .or_else(|| {
+                    value
+                        .as_f64()
+                        .filter(|f| f.is_finite() && *f >= 0.0)
+                        .map(|f| f.round() as u32)
+                })
+                .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+        };
+        FanStatus {
+            lcd_fan_rpm: field("fanLCD"),
+            pump_rpm: field("turboPump"),
+        }
+    }
 }
 
 /// Delay the device needs between the two `waterBlockScreenId` sends.
@@ -168,10 +201,27 @@ impl Client {
         self.link.request("config", &body.to_string())
     }
 
-    /// `POST all`: live system metrics. Fire-and-forget; the device does not
-    /// answer.
-    pub fn send_sysinfo(&mut self, info: &PcInfo) -> Result<(), LegacyError> {
-        self.link.send("all", &commands::pc_info(info).to_string())
+    /// `POST all`: live system metrics, which also keeps the panel awake.
+    /// The reply carries the fan readings; a missing reply is not an error.
+    pub fn send_sysinfo(&mut self, info: &PcInfo) -> Result<FanStatus, LegacyError> {
+        match self
+            .link
+            .request("all", &commands::pc_info(info).to_string())
+        {
+            Ok(response) => Ok(response
+                .json
+                .as_ref()
+                .map(FanStatus::from_json)
+                .unwrap_or_default()),
+            Err(LegacyError::NoResponse { .. }) => Ok(FanStatus::default()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// `POST fanLCDSet`: fixed speed for the display-block fan, 0 to 100.
+    pub fn set_fan_lcd(&mut self, percent: u8) -> Result<Response, LegacyError> {
+        self.link
+            .request("fanLCDSet", &commands::fan_lcd(percent).to_string())
     }
 }
 
@@ -236,6 +286,27 @@ mod tests {
                 attributes: vec!["waterBlockScreen".into(), "argb".into()],
             }
         );
+    }
+
+    #[test]
+    fn fan_status_reads_numbers_or_digit_strings() {
+        let status =
+            FanStatus::from_json(&json!({"status": {"fanLCD": "1280", "turboPump": 2400}}));
+        assert_eq!(
+            status,
+            FanStatus {
+                lcd_fan_rpm: Some(1280),
+                pump_rpm: Some(2400)
+            }
+        );
+        assert_eq!(
+            FanStatus::from_json(&json!({"status": {"fanLCD": "0"}})),
+            FanStatus {
+                lcd_fan_rpm: Some(0),
+                pump_rpm: None
+            }
+        );
+        assert_eq!(FanStatus::from_json(&json!({})), FanStatus::default());
     }
 
     #[test]

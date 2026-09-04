@@ -36,18 +36,26 @@ tryx media preview clip.mp4 --at 5           # a frame exactly as the display ge
 tryx show clip.mp4 --play Loop               # play something already on the display
 tryx display set --brightness 70
 tryx metrics set --labels cpu-temp,gpu-temp,cpu-usage --badges cpu,gpu
-tryx metrics push --interval 2               # send live readings until interrupted
-tryx metrics install                         # keep them live from boot (systemd user service)
+tryx daemon install                          # the daemon: keepalive, live metrics, and every
+                                             # command below routes through it (systemd user service)
+tryx daemon status                           # what it knows: device, fans, pushes, last error
+tryx fans --watch 5                          # LCD fan and pump RPM from the display
+tryx fans --lcd-speed 40                     # fixed display-block fan speed
+tryx display set --filter smoke --filter-opacity 60
+tryx display set --sleep on                  # let the panel sleep with the host
+tryx display reboot
 tryx tui                                     # all of the above, interactively
 tryx completions zsh > ~/.zfunc/_tryx
 ```
 
-The display shows its built-in animation whenever no host is talking to it, so
-`tryx metrics install` is the way to keep your media and overlay up
-permanently; it restores the saved screen on start. After adding yourself to
-`dialout`, restart your systemd user manager (log out fully, or
-`systemctl --user exit` and log in again) or the service will not see the
-new group.
+The panel goes dark about a minute after the host stops talking to it, so
+`tryx daemon install` is the normal way to run things: the daemon owns the
+serial port, keeps the panel awake with live readings, restores the saved
+screen on start, and answers the other commands over a socket so they never
+compete for the port. Without a daemon every command opens the port itself;
+`--direct` forces that. After adding yourself to `dialout`, restart your
+systemd user manager (log out fully, or `systemctl --user exit` and log in
+again) or the service will not see the new group.
 
 Every command takes `--json` for machine-readable output and `-v` to dump the
 frames exchanged with the display. Exit codes: 2 usage, 3 device, 4

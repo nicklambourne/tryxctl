@@ -16,10 +16,10 @@ pub fn run(session: &legacy::Session) -> CommandResult {
     if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
         return Err(Failure::usage("the interface needs a terminal"));
     }
-    let target = session.select()?;
+    let target = session.select_direct()?;
     let (request_tx, request_rx) = mpsc::channel::<Request>();
     let (event_tx, event_rx) = mpsc::channel();
-    let worker = Worker::spawn(target, session.verbose, request_rx, event_tx);
+    let worker = Worker::spawn(session.clone(), target, request_rx, event_tx);
     request_tx.send(Request::Refresh).ok();
 
     let mut terminal = ratatui::init();

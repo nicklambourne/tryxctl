@@ -1,8 +1,10 @@
+mod daemon;
 mod devices;
 mod display;
 mod doctor;
 mod exit;
 mod info;
+mod ipc;
 mod legacy;
 mod media;
 mod metrics;
@@ -33,6 +35,10 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
 
+    /// Open the serial port directly even when the daemon is running.
+    #[arg(long, global = true)]
+    direct: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -59,6 +65,26 @@ enum Command {
     Metrics {
         #[command(subcommand)]
         action: MetricsAction,
+    },
+    /// Read the fan tachometers, or set the display-block fan speed.
+    Fans {
+        /// Poll every N seconds until interrupted.
+        #[arg(long, value_name = "SECONDS")]
+        watch: Option<u64>,
+        /// Fixed speed for the display-block fan, 0 to 100.
+        #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u8).range(0..=100))]
+        lcd_speed: Option<u8>,
+    },
+    /// Run the daemon that owns the port: keepalive, metrics, and commands.
+    Daemon {
+        #[command(subcommand)]
+        action: Option<DaemonAction>,
+        /// Seconds between metric pushes.
+        #[arg(long, value_name = "SECONDS", default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=60))]
+        interval: u64,
+        /// Log nothing but errors.
+        #[arg(short, long)]
+        quiet: bool,
     },
     /// Open the interactive interface.
     Tui,
@@ -98,12 +124,27 @@ enum Command {
 
 #[derive(Subcommand)]
 enum DisplayAction {
-    /// Change display settings.
+    /// Change brightness, the filter effect, or the sleep behaviour.
     Set {
-        /// Backlight brightness, 0 to 100.
-        #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u8).range(0..=100))]
-        brightness: Option<u8>,
+        #[command(flatten)]
+        args: display::SetArgs,
     },
+    /// Reboot the display.
+    Reboot,
+}
+
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// What the running daemon knows.
+    Status,
+    /// Install and start a systemd user service running the daemon.
+    Install {
+        /// Seconds between metric pushes.
+        #[arg(long, value_name = "SECONDS", default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=60))]
+        interval: u64,
+    },
+    /// Stop and remove the service.
+    Uninstall,
 }
 
 // Command enums are built once; the size difference between variants
@@ -133,14 +174,6 @@ enum MetricsAction {
         #[arg(long)]
         no_apply: bool,
     },
-    /// Install and start a systemd user service that runs `metrics push`.
-    Install {
-        /// Seconds between samples.
-        #[arg(long, value_name = "SECONDS", default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=60))]
-        interval: u64,
-    },
-    /// Stop and remove the metrics service.
-    Uninstall,
 }
 
 #[derive(Subcommand)]
@@ -226,14 +259,29 @@ fn main() -> ExitCode {
     let session = legacy::Session {
         tty: cli.tty.clone(),
         verbose: cli.verbose,
+        direct: cli.direct,
     };
     let result: CommandResult = match cli.command {
         Command::Doctor => doctor::run(cli.json).map_err(Failure::from),
         Command::Devices => devices::run(cli.json).map_err(Failure::from),
         Command::Info => info::run(cli.json, &session),
-        Command::Display {
-            action: DisplayAction::Set { brightness },
-        } => display::set(cli.json, &session, brightness),
+        Command::Display { action } => match action {
+            DisplayAction::Set { args } => display::set(cli.json, &session, &args),
+            DisplayAction::Reboot => display::reboot(cli.json, &session),
+        },
+        Command::Fans { watch, lcd_speed } => metrics::fans(cli.json, &session, watch, lcd_speed),
+        Command::Daemon {
+            action,
+            interval,
+            quiet,
+        } => match action {
+            None => daemon::run(&session, interval, quiet),
+            Some(DaemonAction::Status) => daemon::status(cli.json),
+            Some(DaemonAction::Install { interval }) => {
+                daemon::install(cli.json, interval, session.tty.as_deref())
+            }
+            Some(DaemonAction::Uninstall) => daemon::uninstall(cli.json),
+        },
         Command::Media { action } => match action {
             MediaAction::Ls => media::ls(cli.json, &session),
             MediaAction::Check {
@@ -301,10 +349,6 @@ fn main() -> ExitCode {
                 quiet,
                 no_apply,
             } => metrics::push(cli.json, &session, interval, once, quiet, !no_apply),
-            MetricsAction::Install { interval } => {
-                metrics::install(cli.json, interval, session.tty.as_deref())
-            }
-            MetricsAction::Uninstall => metrics::uninstall(cli.json),
         },
     };
     match result {

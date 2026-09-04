@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Gauge, List, ListItem, ListState, Paragraph, Tabs,
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use tryx_legacy::adb::{DiskUsage, MediaFile};
-use tryx_legacy::{DeviceInfo, ScreenConfig};
+use tryx_legacy::{DeviceInfo, FanStatus, ScreenConfig};
 use tryx_monitor::Sample;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +51,8 @@ pub struct App {
     storage: Option<DiskUsage>,
     list: ListState,
     sample: Option<Sample>,
+    fans: FanStatus,
+    via: &'static str,
     screen: ScreenConfig,
     label_cursor: usize,
     brightness: u8,
@@ -74,6 +76,8 @@ impl App {
             storage: None,
             list,
             sample: None,
+            fans: FanStatus::default(),
+            via: "connecting",
             screen: saved.screen,
             label_cursor: 0,
             brightness: saved.brightness.unwrap_or(75),
@@ -106,6 +110,8 @@ impl App {
                     .select(Some(selected.min(self.files.len().saturating_sub(1))));
             }
             Event::Sample(sample) => self.sample = Some(sample),
+            Event::Fans(fans) => self.fans = fans,
+            Event::Via(via) => self.via = via,
             Event::Pushing(pushing) => self.pushing = pushing,
             Event::UploadProgress { name, fraction } => {
                 self.upload = if fraction >= 1.0 {
@@ -454,17 +460,27 @@ impl App {
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
+        let fan = match (self.fans.lcd_fan_rpm, self.fans.pump_rpm) {
+            (Some(fan), Some(pump)) => format!(" · fan {fan} rpm · pump {pump} rpm"),
+            (Some(fan), None) => format!(" · fan {fan} rpm"),
+            (None, Some(pump)) => format!(" · pump {pump} rpm"),
+            (None, None) => String::new(),
+        };
+        let push = match (self.via, self.pushing) {
+            ("daemon", _) => "push via daemon".to_string(),
+            (_, true) => "push on (m)".to_string(),
+            (_, false) => "push off (m)".to_string(),
+        };
         let metrics = match &self.sample {
             Some(sample) => format!(
-                "cpu {} {} · gpu {} {} · mem {}   push {}",
+                "cpu {} {} · gpu {} {} · mem {}{fan}   {push}",
                 fmt(sample.cpu.temperature_c, "°C"),
                 fmt(sample.cpu.usage_percent, "%"),
                 fmt(sample.gpu.temperature_c, "°C"),
                 fmt(sample.gpu.usage_percent, "%"),
                 fmt(sample.memory.usage_percent, "%"),
-                if self.pushing { "on (m)" } else { "off (m)" },
             ),
-            None => "host metrics unavailable".to_string(),
+            None => format!("host metrics unavailable   {push}"),
         };
         let second = match (&self.prompt, &self.upload, &self.error) {
             (Some(Prompt::UploadPath(text)), _, _) => Line::from(format!(

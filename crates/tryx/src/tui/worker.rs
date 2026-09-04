@@ -2,7 +2,8 @@
 //! monitor, and the periodic metrics push all live here so frames never
 //! interleave on the port.
 
-use crate::legacy::Target;
+use crate::ipc::{self, Request as IpcRequest};
+use crate::legacy::{Connection, Session, Target};
 use crate::media::connect_adb;
 use crate::metrics::pc_info;
 use crate::state;
@@ -11,7 +12,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tryx_legacy::adb::{Adb, DiskUsage, MediaFile};
-use tryx_legacy::{Client, DeviceInfo, ScreenConfig};
+use tryx_legacy::{DeviceInfo, FanStatus, ScreenConfig};
 use tryx_media::check::{Options, Severity};
 use tryx_media::plan::Action;
 use tryx_media::target::LEGACY_PANORAMA;
@@ -31,6 +32,8 @@ pub enum Request {
 
 pub enum Event {
     Info(DeviceInfo),
+    Fans(FanStatus),
+    Via(&'static str),
     Media {
         files: Vec<MediaFile>,
         storage: Option<DiskUsage>,
@@ -53,13 +56,13 @@ pub struct Worker {
 
 impl Worker {
     pub fn spawn(
+        session: Session,
         target: Target,
-        verbose: bool,
         requests: Receiver<Request>,
         events: Sender<Event>,
     ) -> Worker {
         let handle = std::thread::spawn(move || {
-            let mut state = WorkerState::new(target, verbose, events);
+            let mut state = WorkerState::new(session, target, events);
             state.run(requests);
         });
         Worker { handle }
@@ -71,10 +74,10 @@ impl Worker {
 }
 
 struct WorkerState {
+    session: Session,
     target: Target,
-    verbose: bool,
     events: Sender<Event>,
-    client: Option<Client>,
+    connection: Option<Connection>,
     adb: Option<Adb>,
     monitor: Monitor,
     pushing: bool,
@@ -82,12 +85,12 @@ struct WorkerState {
 }
 
 impl WorkerState {
-    fn new(target: Target, verbose: bool, events: Sender<Event>) -> Self {
+    fn new(session: Session, target: Target, events: Sender<Event>) -> Self {
         WorkerState {
+            session,
             target,
-            verbose,
             events,
-            client: None,
+            connection: None,
             adb: None,
             monitor: Monitor::new(),
             pushing: false,
@@ -106,16 +109,7 @@ impl WorkerState {
             }
             if self.last_sample.elapsed() >= SAMPLE_INTERVAL && Monitor::supported() {
                 self.last_sample = Instant::now();
-                let sample = self.monitor.sample();
-                if self.pushing
-                    && let Some(client) = &mut self.client
-                    && let Err(error) = client.send_sysinfo(&pc_info(&sample))
-                {
-                    self.pushing = false;
-                    self.emit(Event::Pushing(false));
-                    self.emit(Event::Error(format!("metrics push stopped: {error}")));
-                }
-                self.emit(Event::Sample(sample));
+                self.tick();
             }
         }
     }
@@ -124,17 +118,61 @@ impl WorkerState {
         let _ = self.events.send(event);
     }
 
-    fn connect(&mut self) {
-        match Client::open(&self.target.tty) {
-            Ok(mut client) => {
-                client.set_trace(self.verbose);
-                match client.handshake() {
-                    Ok(info) => self.emit(Event::Info(info)),
-                    Err(error) => self.emit(Event::Error(format!("handshake failed: {error}"))),
+    /// Every two seconds: a host sample for the footer, plus the push when
+    /// this worker owns the port. With the daemon, its status carries both.
+    fn tick(&mut self) {
+        match &mut self.connection {
+            Some(Connection::Daemon) => match ipc::call(&IpcRequest::Status) {
+                Ok(Some(reply)) if reply.ok => {
+                    if let Ok(status) = serde_json::from_value::<ipc::DaemonStatus>(reply.value) {
+                        if let Some(sample) = status.sample {
+                            self.emit(Event::Sample(sample));
+                        }
+                        self.emit(Event::Fans(status.fans));
+                    }
                 }
-                self.client = Some(client);
+                _ => self.emit(Event::Error("lost the daemon".to_string())),
+            },
+            Some(Connection::Direct { client, .. }) => {
+                let mut sample = self.monitor.sample();
+                sample.timestamp_ms += tryx_legacy::local_utc_offset_ms();
+                if self.pushing {
+                    match client.send_sysinfo(&pc_info(&sample)) {
+                        Ok(fans) => self.emit(Event::Fans(fans)),
+                        Err(error) => {
+                            self.pushing = false;
+                            self.emit(Event::Pushing(false));
+                            self.emit(Event::Error(format!("metrics push stopped: {error}")));
+                        }
+                    }
+                }
+                self.emit(Event::Sample(sample));
             }
-            Err(error) => self.emit(Event::Error(format!("serial port: {error}"))),
+            None => {
+                let sample = self.monitor.sample();
+                self.emit(Event::Sample(sample));
+            }
+        }
+    }
+
+    fn connect(&mut self) {
+        match self.session.connect() {
+            Ok(mut connection) => {
+                self.emit(Event::Via(connection.via()));
+                match connection.info() {
+                    Ok(info) => self.emit(Event::Info(info)),
+                    Err(failure) => self.emit(Event::Error(format!(
+                        "handshake failed: {}",
+                        failure.message
+                    ))),
+                }
+                if matches!(connection, Connection::Daemon) {
+                    self.pushing = true;
+                    self.emit(Event::Pushing(true));
+                }
+                self.connection = Some(connection);
+            }
+            Err(failure) => self.emit(Event::Error(failure.message)),
         }
         match connect_adb(&self.target) {
             Ok((adb, _)) => self.adb = Some(adb),
@@ -150,15 +188,18 @@ impl WorkerState {
             Request::Brightness(value) => self.brightness(value),
             Request::Overlay(screen) => self.overlay(*screen),
             Request::Upload(path) => self.upload(&path),
-            Request::PushMetrics(enabled) => {
-                self.pushing = enabled && self.client.is_some();
-                self.emit(Event::Pushing(self.pushing));
-                if enabled && self.client.is_none() {
-                    Err("no serial connection".to_string())
-                } else {
+            Request::PushMetrics(enabled) => match &self.connection {
+                Some(Connection::Daemon) => {
+                    self.emit(Event::Pushing(true));
+                    Err("the daemon pushes metrics; stop it to push from here".to_string())
+                }
+                Some(Connection::Direct { .. }) => {
+                    self.pushing = enabled;
+                    self.emit(Event::Pushing(enabled));
                     Ok(())
                 }
-            }
+                None => Err("not connected".to_string()),
+            },
             Request::Quit => Ok(()),
         };
         if let Err(message) = outcome {
@@ -166,10 +207,10 @@ impl WorkerState {
         }
     }
 
-    fn client(&mut self) -> Result<&mut Client, String> {
-        self.client
+    fn connection(&mut self) -> Result<&mut Connection, String> {
+        self.connection
             .as_mut()
-            .ok_or_else(|| "no serial connection".to_string())
+            .ok_or_else(|| "not connected".to_string())
     }
 
     fn adb(&self) -> Result<&Adb, String> {
@@ -190,25 +231,27 @@ impl WorkerState {
         let mut saved = state::load();
         saved.screen.media = media.clone();
         saved.screen.play_mode = play.clone();
-        crate::legacy::apply_screen(self.client()?, &mut saved).map_err(|e| e.to_string())?;
+        self.connection()?
+            .apply(&mut saved)
+            .map_err(|f| f.message)?;
         let _ = state::save(&saved);
         self.emit(Event::Log(format!("showing {} ({play})", media.join(", "))));
         Ok(())
     }
 
     fn delete(&mut self, name: &str) -> Result<(), String> {
-        self.client()?
+        self.connection()?
             .delete_media(&[name.to_string()])
-            .map_err(|e| e.to_string())?;
+            .map_err(|f| f.message)?;
         self.adb()?.remove(name).map_err(|e| e.to_string())?;
         self.emit(Event::Log(format!("removed {name}")));
         self.refresh()
     }
 
     fn brightness(&mut self, value: u8) -> Result<(), String> {
-        self.client()?
-            .set_brightness(value)
-            .map_err(|e| e.to_string())?;
+        self.connection()?
+            .brightness(value)
+            .map_err(|f| f.message)?;
         let mut saved = state::load();
         saved.brightness = Some(value);
         let _ = state::save(&saved);
@@ -219,13 +262,9 @@ impl WorkerState {
     fn overlay(&mut self, screen: ScreenConfig) -> Result<(), String> {
         let mut saved = state::load();
         saved.screen = screen;
-        let (cpu, gpu) = crate::legacy::hardware_names(&mut saved);
-        let client = self.client()?;
-        client.send_spec(&cpu, &gpu).map_err(|e| e.to_string())?;
-        crate::legacy::apply_screen(client, &mut saved).map_err(|e| e.to_string())?;
-        if saved.screen.sysinfo_display.is_empty() {
-            client.set_sysinfo_display(&[]).map_err(|e| e.to_string())?;
-        }
+        self.connection()?
+            .apply(&mut saved)
+            .map_err(|f| f.message)?;
         let _ = state::save(&saved);
         self.emit(Event::Log(if saved.screen.sysinfo_display.is_empty() {
             "overlay cleared".to_string()
