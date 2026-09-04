@@ -10,6 +10,8 @@ pub const BAUD_RATE: u32 = 115_200;
 /// 500 ms; a single deadline is simpler and more tolerant.
 pub const DEFAULT_RESPONSE_TIMEOUT: Duration = Duration::from_millis(1000);
 const READ_SLICE: Duration = Duration::from_millis(50);
+/// Longest wait for stale input to stop arriving before a request.
+const DRAIN_WINDOW: Duration = Duration::from_millis(150);
 
 pub struct SerialLink {
     port: Box<dyn serialport::SerialPort>,
@@ -63,8 +65,33 @@ impl SerialLink {
         self.read_response(command)
     }
 
+    /// Discards whatever the device sent that nobody read: replies to
+    /// fire-and-forget commands, or a late answer to a previous process.
+    /// Replies carry no correlation field, so a stale frame would otherwise
+    /// be taken as the answer to the next request and shift every reply by
+    /// one for the life of the link.
+    pub fn drain(&mut self) -> usize {
+        let deadline = Instant::now() + DRAIN_WINDOW;
+        let mut discarded = 0;
+        let mut chunk = [0u8; 256];
+        while Instant::now() < deadline {
+            match self.port.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(count) => discarded += count,
+                Err(error) if error.kind() == ErrorKind::TimedOut => break,
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        if discarded > 0 && self.trace {
+            eprintln!("   discarded {discarded} stale bytes before sending");
+        }
+        discarded
+    }
+
     /// Sends `POST <command>` without waiting for a reply.
     pub fn send(&mut self, command: &str, content: &str) -> Result<(), LegacyError> {
+        self.drain();
         self.sequence += 1;
         let bytes = frame::build_frame("POST", command, content, "1", self.sequence)?;
         if self.trace {
@@ -188,5 +215,39 @@ mod tests {
         let error = link.request("conn", "").unwrap_err();
         assert!(matches!(error, LegacyError::NoResponse { .. }), "{error}");
         assert!(started.elapsed() >= Duration::from_millis(150));
+    }
+
+    #[test]
+    fn a_stale_reply_is_discarded_before_the_next_request() {
+        let (mut device, mut link) = pair();
+        // A reply nobody read, as after a fire-and-forget command.
+        let stale =
+            frame::wrap(b"1 200\r\nContentType=json\r\n\r\n{\"status\":{\"fanLCD\":\"0\"}}")
+                .unwrap();
+        device.write_all(&stale).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let device_side = std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let mut chunk = [0u8; 256];
+            let request = loop {
+                let count = device.read(&mut chunk).expect("device read");
+                buffer.extend_from_slice(&chunk[..count]);
+                if let Some(bytes) = frame::take_frame(&mut buffer) {
+                    break frame::parse_response(&bytes).expect("request parses");
+                }
+            };
+            let reply =
+                frame::wrap(b"1 200\r\nContentType=json\r\n\r\n{\"productId\":\"cm01\"}").unwrap();
+            device.write_all(&reply).unwrap();
+            (request, device)
+        });
+        let response = link.request("conn", "").expect("response");
+        assert_eq!(
+            response.json.unwrap()["productId"],
+            "cm01",
+            "got the fresh reply, not the stale one"
+        );
+        let (request, _device) = device_side.join().unwrap();
+        assert_eq!(request.status, "conn");
     }
 }
