@@ -529,23 +529,20 @@ fn derive_name(
         Some(Kind::Image) => "png".to_string(),
         _ => "mp4".to_string(),
     };
+    let suffix = format!(".{extension}");
     let stem = match requested {
-        Some(name) => name.trim_end_matches(&format!(".{extension}")).to_string(),
+        Some(name) => name.strip_suffix(&suffix).unwrap_or(name).to_string(),
         None => path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default(),
     };
     let safe = sanitize_stem(&stem);
-    let name = format!("{safe}.{extension}");
-    if requested.is_some_and(|requested| requested != name) || (requested.is_none() && safe != stem)
-    {
+    let name = format!("{safe}{suffix}");
+    if safe != stem {
         findings.push(auto(
             "TRYX-M-NAME",
-            format!(
-                "{:?} is not a safe device file name",
-                requested.unwrap_or(&stem)
-            ),
+            format!("{stem:?} is not a safe device file name"),
             format!("store it as {name}"),
         ));
     }
@@ -818,6 +815,42 @@ mod tests {
             &Options::default(),
         );
         assert!(codes(&report, Severity::Fatal).contains(&"TRYX-M-EMPTY"));
+    }
+
+    #[test]
+    fn requested_names_are_accepted_with_or_without_the_extension() {
+        for requested in ["tryx-fit-169", "tryx-fit-169.mp4"] {
+            let options = Options {
+                name: Some(requested.to_string()),
+                ..Options::default()
+            };
+            let report = check(
+                Path::new("/x/My Movie.mp4"),
+                10,
+                &vendor_probe(),
+                LEGACY_PANORAMA,
+                &options,
+            );
+            assert_eq!(report.name, "tryx-fit-169.mp4");
+            assert!(
+                !codes(&report, Severity::Auto).contains(&"TRYX-M-NAME"),
+                "{requested}: {:?}",
+                report.findings
+            );
+        }
+        let options = Options {
+            name: Some("my clip!".to_string()),
+            ..Options::default()
+        };
+        let report = check(
+            Path::new("/x/v.mp4"),
+            10,
+            &vendor_probe(),
+            LEGACY_PANORAMA,
+            &options,
+        );
+        assert_eq!(report.name, "my-clip.mp4");
+        assert!(codes(&report, Severity::Auto).contains(&"TRYX-M-NAME"));
     }
 
     #[test]
