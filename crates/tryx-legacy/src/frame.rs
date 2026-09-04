@@ -266,6 +266,58 @@ mod tests {
         );
     }
 
+    /// Captured from a Panorama SE on firmware V1.0.3 (`tryx info -v`,
+    /// 2026-09-04). The device escapes `[` (0x5B) and the `Z` (0x5A) in the
+    /// serial number, and orders its headers differently from requests. The
+    /// serial number itself is replaced by a placeholder of the same shape, with
+    /// the checksum recomputed.
+    const REAL_CONN_REPLY: &str = "5a 00 f4 31 20 32 30 30 0d 0a 41 63 6b 4e 75 6d 62 65 72 3d 30 0d 0a 43 6f 6e 74 65 6e 74 4c 65 6e 67 74 68 3d 31 38 30 0d 0a 43 6f 6e 74 65 6e 74 54 79 70 65 3d 6a 73 6f 6e 0d 0a 0d 0a 7b 22 61 74 74 72 69 62 75 74 65 22 3a 5b 02 22 53 74 61 74 75 73 22 2c 22 57 61 74 65 72 20 42 6c 6f 63 6b 20 53 63 72 65 65 6e 22 2c 22 46 61 6e 20 4c 43 44 7c 72 77 22 5d 2c 22 4f 53 22 3a 22 41 6e 64 72 6f 69 64 22 2c 22 70 72 6f 64 75 63 74 49 64 22 3a 22 63 6d 30 31 22 2c 22 76 65 72 73 69 6f 6e 22 3a 7b 22 61 70 70 22 3a 22 31 2e 30 22 2c 22 66 69 72 6d 77 61 72 65 22 3a 22 56 31 2e 30 2e 33 22 2c 22 68 61 72 64 77 61 72 65 22 3a 22 56 31 2e 31 22 7d 2c 22 73 6e 22 3a 22 58 59 5b 01 30 30 30 30 30 30 30 30 30 30 30 30 30 30 31 22 7d 11 5a";
+
+    /// The same device acknowledging `POST brightness {"value":75}`.
+    const REAL_BRIGHTNESS_REPLY: &str = "5a 00 3e 31 20 32 30 30 0d 0a 41 63 6b 4e 75 6d 62 65 72 3d 30 0d 0a 43 6f 6e 74 65 6e 74 4c 65 6e 67 74 68 3d 30 0d 0a 43 6f 6e 74 65 6e 74 54 79 70 65 3d 6a 73 6f 6e 0d 0a 0d 0a 97 5a";
+
+    fn from_hex(text: &str) -> Vec<u8> {
+        text.split_whitespace()
+            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn decodes_a_real_conn_reply() {
+        let bytes = from_hex(REAL_CONN_REPLY);
+        assert_eq!(bytes.len(), 246);
+        let response = parse_response(&bytes).unwrap();
+        assert_eq!(response.version, "1");
+        assert_eq!(response.status, "200");
+        assert!(response.checksum_ok);
+        assert!(response.length_ok);
+        let json = response.json.unwrap();
+        assert_eq!(json["productId"], "cm01");
+        assert_eq!(json["sn"], "XYZ000000000000001");
+        assert_eq!(json["version"]["firmware"], "V1.0.3");
+        assert_eq!(json["attribute"][2], "Fan LCD|rw");
+        assert_eq!(response.body.len(), 180);
+    }
+
+    #[test]
+    fn decodes_a_real_brightness_acknowledgement() {
+        let response = parse_response(&from_hex(REAL_BRIGHTNESS_REPLY)).unwrap();
+        assert_eq!(response.status, "200");
+        assert!(response.checksum_ok);
+        assert!(response.length_ok);
+        assert!(response.body.is_empty());
+        assert!(response.json.is_none());
+    }
+
+    #[test]
+    fn build_frame_reproduces_the_real_conn_request() {
+        // The exact 68 bytes the device answered on 2026-09-04.
+        let expected = from_hex(
+            "5a 00 44 50 4f 53 54 20 63 6f 6e 6e 20 31 0d 0a 43 6f 6e 74 65 6e 74 54 79 70 65 3d 6a 73 6f 6e 0d 0a 43 6f 6e 74 65 6e 74 4c 65 6e 67 74 68 3d 30 0d 0a 41 63 6b 4e 75 6d 62 65 72 3d 31 0d 0a 0d 0a 20 5a",
+        );
+        assert_eq!(build_frame("POST", "conn", "", "1", 1).unwrap(), expected);
+    }
+
     #[test]
     fn take_frame_skips_noise_and_splits_consecutive_frames() {
         let first = device_reply(b"1 OK\r\n\r\n{\"a\":1}");

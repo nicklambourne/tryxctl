@@ -15,8 +15,13 @@ pub fn ls(json: bool, session: &legacy::Session) -> CommandResult {
         })
     })?;
     if selected.state != "device" {
+        let hint = if selected.state.starts_with("no") {
+            "; the adb server probably started before the udev rule was installed, run `adb kill-server` and retry"
+        } else {
+            ""
+        };
         return Err(Failure::device(format!(
-            "adb reports the display ({}) as {}",
+            "adb reports the display ({}) as {}{hint}",
             selected.serial, selected.state
         )));
     }

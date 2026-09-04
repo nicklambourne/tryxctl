@@ -39,6 +39,8 @@ pub fn parse_devices(output: &str) -> Vec<AdbDevice> {
         .filter_map(|line| {
             let mut tokens = line.split_whitespace();
             let serial = tokens.next()?.to_string();
+            // "no permissions (missing udev rules? ...)" spans several
+            // tokens; keep the first word so callers can match on it.
             let state = tokens.next()?.to_string();
             let mut device = AdbDevice {
                 serial,
