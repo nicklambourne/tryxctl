@@ -174,19 +174,30 @@ impl Adb {
         self.run(&["pull", &remote, &local], true).map(drop)
     }
 
-    pub fn remove(&self, remote_name: &str) -> Result<(), LegacyError> {
+    /// Removes a file; `Ok(false)` when it was already gone, which happens
+    /// after the firmware acted on a `mediaDelete` command itself.
+    pub fn remove(&self, remote_name: &str) -> Result<bool, LegacyError> {
         let remote = self.remote_path(remote_name)?;
         let command = format!("rm -- {remote}");
-        let output = self.run(&["shell", &command], true)?;
+        let output = match self.run(&["shell", &command], true) {
+            Ok(output) => output,
+            Err(LegacyError::Adb { message, .. }) if message.contains("No such file") => {
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
         // Old adbd versions report every shell command as successful, so
         // the message is the only signal.
-        if output.contains("No such file") || output.contains("rm:") {
+        if output.contains("No such file") {
+            return Ok(false);
+        }
+        if output.contains("rm:") {
             return Err(LegacyError::Adb {
                 args: format!("shell {command}"),
                 message: output.trim().to_string(),
             });
         }
-        Ok(())
+        Ok(true)
     }
 
     fn remote_path(&self, name: &str) -> Result<String, LegacyError> {

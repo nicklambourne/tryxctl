@@ -184,7 +184,15 @@ fn summary_line(report: &Report) -> String {
         parts.push(format!("{seconds:.1} s"));
     }
     parts.push(output::human_bytes(source.size));
-    parts.push(source.container.split(',').next().unwrap_or("").to_string());
+    let containers: Vec<&str> = source.container.split(',').collect();
+    parts.push(
+        containers
+            .iter()
+            .find(|name| **name == "mp4")
+            .or(containers.first())
+            .unwrap_or(&"")
+            .to_string(),
+    );
     parts.join(" · ")
 }
 
@@ -283,7 +291,8 @@ fn run_plan(
         Action::Passthrough => "copying",
     };
     encode::run(ffmpeg, plan, output, duration, |progress| {
-        if quiet {
+        if quiet || (progress.fraction.is_none() && progress.seconds == 0.0 && progress.bytes == 0)
+        {
             return;
         }
         match progress.fraction {
@@ -598,9 +607,17 @@ pub fn rm(json: bool, session: &legacy::Session, names: &[String]) -> CommandRes
     }
     let target = session.select()?;
     let (adb, _) = connect_adb(&target)?;
+    let existing = adb.list_media()?;
+    if let Some(name) = names
+        .iter()
+        .find(|name| !existing.iter().any(|entry| &entry.name == *name))
+    {
+        return Err(Failure::media(format!("{name} is not on the display")));
+    }
     let mut client = session.open(&target)?;
     let mut removed = Vec::new();
     for name in names {
+        // The firmware deletes the file itself; adb only mops up if it did not.
         client.delete_media(std::slice::from_ref(name))?;
         adb.remove(name)?;
         removed.push(name.clone());
