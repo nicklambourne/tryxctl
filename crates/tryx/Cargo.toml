@@ -44,16 +44,18 @@ recommends = "ffmpeg, adb"
 extended-description = """Controls TRYX Panorama cooler displays from the terminal: upload images and
 videos with validation and conversion, manage the files on the display, set
 brightness, and show live CPU, GPU, and memory readings in the overlay."""
-maintainer-scripts = "packaging/deb"
+# Paths are relative to this manifest, except target/release/, which
+# cargo-deb maps to the build target directory.
+maintainer-scripts = "../../packaging/deb"
 assets = [
     ["target/release/tryx", "usr/bin/", "755"],
-    ["packaging/udev/70-tryx-access.rules", "lib/udev/rules.d/", "644"],
-    ["packaging/udev/71-tryx-legacy.rules", "lib/udev/rules.d/", "644"],
-    ["packaging/udev/99-tryx-printer.rules", "lib/udev/rules.d/", "644"],
-    ["target/packaging/tryx.1", "usr/share/man/man1/", "644"],
-    ["target/packaging/tryx.bash", "usr/share/bash-completion/completions/tryx", "644"],
-    ["target/packaging/_tryx", "usr/share/zsh/vendor-completions/", "644"],
-    ["target/packaging/tryx.fish", "usr/share/fish/vendor_completions.d/", "644"],
-    ["README.md", "usr/share/doc/tryx/", "644"],
-    ["THIRD_PARTY.md", "usr/share/doc/tryx/", "644"],
+    ["../../packaging/udev/70-tryx-access.rules", "lib/udev/rules.d/", "644"],
+    ["../../packaging/udev/71-tryx-legacy.rules", "lib/udev/rules.d/", "644"],
+    ["../../packaging/udev/99-tryx-printer.rules", "lib/udev/rules.d/", "644"],
+    ["../../target/packaging/tryx.1", "usr/share/man/man1/", "644"],
+    ["../../target/packaging/tryx.bash", "usr/share/bash-completion/completions/tryx", "644"],
+    ["../../target/packaging/_tryx", "usr/share/zsh/vendor-completions/", "644"],
+    ["../../target/packaging/tryx.fish", "usr/share/fish/vendor_completions.d/", "644"],
+    ["../../README.md", "usr/share/doc/tryx/", "644"],
+    ["../../THIRD_PARTY.md", "usr/share/doc/tryx/", "644"],
 ]
