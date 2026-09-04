@@ -2,9 +2,9 @@ use crate::exit::{self, CommandResult};
 use crate::{legacy, output};
 use serde_json::json;
 
-pub fn run(json: bool, tty: Option<&str>) -> CommandResult {
-    let target = legacy::select(tty)?;
-    let mut client = legacy::open(&target)?;
+pub fn run(json: bool, session: &legacy::Session) -> CommandResult {
+    let target = session.select()?;
+    let mut client = session.open(&target)?;
     let info = client.handshake()?;
     if json {
         println!(

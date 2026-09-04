@@ -77,6 +77,11 @@ impl Client {
         Client { link }
     }
 
+    /// Dump every frame on the wire to stderr.
+    pub fn set_trace(&mut self, trace: bool) {
+        self.link.trace = trace;
+    }
+
     /// `POST conn`: identifies the device.
     pub fn handshake(&mut self) -> Result<DeviceInfo, LegacyError> {
         let response = self.link.request("conn", "")?;

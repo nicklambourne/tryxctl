@@ -3,8 +3,8 @@ use crate::{legacy, output};
 use serde_json::json;
 use tryx_legacy::adb::{self, Adb};
 
-pub fn ls(json: bool, tty: Option<&str>) -> CommandResult {
-    let target = legacy::select(tty)?;
+pub fn ls(json: bool, session: &legacy::Session) -> CommandResult {
+    let target = session.select()?;
     let adb = Adb::new()?;
     let devices = adb.devices()?;
     let selected = adb::select(&devices, target.usb_serial(), target.sysfs_name()).ok_or_else(|| {

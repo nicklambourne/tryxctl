@@ -4,6 +4,24 @@ use crate::exit::Failure;
 use tryx_device::discovery::{Access, LegacyDevice};
 use tryx_legacy::Client;
 
+/// Global options that pick and configure the display connection.
+pub struct Session {
+    pub tty: Option<String>,
+    pub verbose: bool,
+}
+
+impl Session {
+    pub fn select(&self) -> Result<Target, Failure> {
+        select(self.tty.as_deref())
+    }
+
+    pub fn open(&self, target: &Target) -> Result<Client, Failure> {
+        let mut client = Client::open(&target.tty)?;
+        client.set_trace(self.verbose);
+        Ok(client)
+    }
+}
+
 pub struct Target {
     pub tty: String,
     /// The discovered device, when the port came from discovery.
@@ -70,8 +88,4 @@ pub fn select(tty_override: Option<&str>) -> Result<Target, Failure> {
             "several legacy displays are connected; choose one with --tty",
         )),
     }
-}
-
-pub fn open(target: &Target) -> Result<Client, Failure> {
-    Ok(Client::open(&target.tty)?)
 }

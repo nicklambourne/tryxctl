@@ -2,12 +2,12 @@ use crate::exit::{self, CommandResult, Failure};
 use crate::legacy;
 use serde_json::json;
 
-pub fn set(json: bool, tty: Option<&str>, brightness: Option<u8>) -> CommandResult {
+pub fn set(json: bool, session: &legacy::Session, brightness: Option<u8>) -> CommandResult {
     let Some(brightness) = brightness else {
         return Err(Failure::usage("nothing to set; pass --brightness <0-100>"));
     };
-    let target = legacy::select(tty)?;
-    let mut client = legacy::open(&target)?;
+    let target = session.select()?;
+    let mut client = session.open(&target)?;
     let response = client.set_brightness(brightness)?;
     if json {
         println!(

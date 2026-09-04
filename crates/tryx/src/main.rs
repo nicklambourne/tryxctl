@@ -23,6 +23,10 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     tty: Option<String>,
 
+    /// Dump every frame exchanged with the display to stderr.
+    #[arg(short, long, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -65,17 +69,20 @@ enum MediaAction {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let tty = cli.tty.as_deref();
+    let session = legacy::Session {
+        tty: cli.tty.clone(),
+        verbose: cli.verbose,
+    };
     let result: CommandResult = match cli.command {
         Command::Doctor => doctor::run(cli.json).map_err(Failure::from),
         Command::Devices => devices::run(cli.json).map_err(Failure::from),
-        Command::Info => info::run(cli.json, tty),
+        Command::Info => info::run(cli.json, &session),
         Command::Display {
             action: DisplayAction::Set { brightness },
-        } => display::set(cli.json, tty, brightness),
+        } => display::set(cli.json, &session, brightness),
         Command::Media {
             action: MediaAction::Ls,
-        } => media::ls(cli.json, tty),
+        } => media::ls(cli.json, &session),
     };
     match result {
         Ok(code) => code,

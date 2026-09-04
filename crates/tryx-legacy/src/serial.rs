@@ -16,6 +16,8 @@ pub struct SerialLink {
     path: String,
     sequence: u32,
     pub response_timeout: Duration,
+    /// Dump every frame on the wire to stderr as hex plus decoded text.
+    pub trace: bool,
 }
 
 impl SerialLink {
@@ -47,6 +49,7 @@ impl SerialLink {
             path: path.to_string(),
             sequence: 0,
             response_timeout: DEFAULT_RESPONSE_TIMEOUT,
+            trace: false,
         }
     }
 
@@ -64,6 +67,14 @@ impl SerialLink {
     pub fn send(&mut self, command: &str, content: &str) -> Result<(), LegacyError> {
         self.sequence += 1;
         let bytes = frame::build_frame("POST", command, content, "1", self.sequence)?;
+        if self.trace {
+            eprintln!(
+                "-> {command} #{} {} bytes\n   {}",
+                self.sequence,
+                bytes.len(),
+                hex(&bytes)
+            );
+        }
         self.port.write_all(&bytes)?;
         self.port.flush()?;
         Ok(())
@@ -79,10 +90,24 @@ impl SerialLink {
                 Ok(count) => {
                     buffer.extend_from_slice(&chunk[..count]);
                     if let Some(bytes) = frame::take_frame(&mut buffer) {
-                        return frame::parse_response(&bytes).ok_or_else(|| {
-                            LegacyError::MalformedResponse {
-                                command: command.to_string(),
+                        let response = frame::parse_response(&bytes);
+                        if self.trace {
+                            eprintln!("<- {} bytes\n   {}", bytes.len(), hex(&bytes));
+                            if let Some(response) = &response {
+                                eprintln!(
+                                    "   text: {:?} (checksum {}, length {})",
+                                    response.raw,
+                                    if response.checksum_ok {
+                                        "ok"
+                                    } else {
+                                        "MISMATCH"
+                                    },
+                                    if response.length_ok { "ok" } else { "MISMATCH" },
+                                );
                             }
+                        }
+                        return response.ok_or_else(|| LegacyError::MalformedResponse {
+                            command: command.to_string(),
                         });
                     }
                 }
@@ -96,6 +121,14 @@ impl SerialLink {
             timeout_ms: self.response_timeout.as_millis() as u64,
         })
     }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(all(test, unix))]
