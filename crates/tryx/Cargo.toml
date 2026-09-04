@@ -16,6 +16,7 @@ tryx-device = { path = "../tryx-device" }
 tryx-legacy = { path = "../tryx-legacy" }
 tryx-media = { path = "../tryx-media" }
 tryx-monitor = { path = "../tryx-monitor" }
+viuer = { version = "0.9", features = ["print-file"] }
 which = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

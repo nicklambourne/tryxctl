@@ -239,3 +239,30 @@ fn metrics_status_is_linux_only() {
         assert_eq!(output.status.code(), Some(4));
     }
 }
+
+#[test]
+fn media_preview_writes_a_png_when_not_on_a_terminal() {
+    let Some(png) = sample_png("preview.png") else {
+        return;
+    };
+    let out = png.with_file_name("preview-out.png");
+    let output = tryx()
+        .args(["media", "preview", "--mode", "stretch", "-o"])
+        .arg(&out)
+        .arg(&png)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(out.is_file());
+    let sheet = tryx()
+        .args(["media", "preview", "--sheet"])
+        .arg(&png)
+        .output()
+        .unwrap();
+    assert_eq!(sheet.status.code(), Some(2), "sheet needs a video");
+}

@@ -7,6 +7,7 @@
 pub mod check;
 pub mod encode;
 pub mod plan;
+pub mod preview;
 pub mod probe;
 pub mod target;
 pub mod transform;

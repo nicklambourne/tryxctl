@@ -3,13 +3,14 @@ use crate::legacy::{self, Target as DeviceTarget};
 use crate::output;
 use owo_colors::{OwoColorize, Stream};
 use serde_json::json;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use tryx_legacy::adb::{self, Adb, is_safe_media_name};
 use tryx_media::check::{self, Finding, Options, Report, Severity, Source};
 use tryx_media::plan::Action;
 use tryx_media::target::LEGACY_PANORAMA;
 use tryx_media::transform::{Mode, Transform};
-use tryx_media::{Plan, Probe, encode};
+use tryx_media::{Plan, Probe, encode, preview};
 
 /// Room to leave on the display's storage after an upload.
 const FREE_SPACE_MARGIN: u64 = 16 * 1024 * 1024;
@@ -631,6 +632,112 @@ pub fn rm(json: bool, session: &legacy::Session, names: &[String]) -> CommandRes
             "{}",
             serde_json::to_string_pretty(&json!({"removed": removed}))?
         );
+    }
+    Ok(exit::ok())
+}
+
+pub fn preview(
+    json: bool,
+    file: &Path,
+    at: Option<f64>,
+    sheet: bool,
+    output: Option<PathBuf>,
+    transform: &TransformArgs,
+) -> CommandResult {
+    let (ffmpeg, ffprobe) = encode::tools()?;
+    let options = transform.options(None)?;
+    let analysis = analyse(&ffprobe, file, &options);
+    let Some(kind) = analysis.report.kind else {
+        print_report(&analysis);
+        return Err(Failure::media("the file has no picture to preview"));
+    };
+    let duration = analysis.report.source.duration;
+    if sheet && kind == check::Kind::Image {
+        return Err(Failure::usage("--sheet needs a video"));
+    }
+    let at = at.map(|seconds| match duration {
+        Some(total) if seconds > total => total.max(0.0),
+        _ => seconds.max(0.0),
+    });
+
+    let inline = output.is_none() && std::io::stdout().is_terminal();
+    let path = match &output {
+        Some(path) => path.clone(),
+        None if inline => {
+            std::env::temp_dir().join(format!("tryx-preview-{}.png", std::process::id()))
+        }
+        None => {
+            let stem = file
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "media".into());
+            PathBuf::from(format!("{stem}-preview.png"))
+        }
+    };
+    if sheet {
+        let total = duration
+            .ok_or_else(|| Failure::media("cannot make a sheet: the duration is unknown"))?;
+        preview::render_sheet(
+            &ffmpeg,
+            file,
+            &options.transform,
+            LEGACY_PANORAMA,
+            total,
+            &path,
+        )?;
+    } else {
+        preview::render_frame(
+            &ffmpeg,
+            file,
+            kind,
+            &options.transform,
+            LEGACY_PANORAMA,
+            at,
+            &path,
+        )?;
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "path": path,
+                "kind": kind,
+                "at": at,
+                "sheet": sheet,
+                "transform": options.transform,
+                "target": LEGACY_PANORAMA,
+            }))?
+        );
+        return Ok(exit::ok());
+    }
+    if inline {
+        let (columns, _) = viuer::terminal_size();
+        let config = viuer::Config {
+            width: Some(u32::from(columns.saturating_sub(2).max(20))),
+            truecolor: true,
+            use_kitty: true,
+            use_iterm: true,
+            ..Default::default()
+        };
+        let shown = viuer::print_from_file(&path, &config);
+        let _ = std::fs::remove_file(&path);
+        shown.map_err(|error| {
+            Failure::environment(format!("could not draw the preview: {error}"))
+        })?;
+        println!(
+            "{}",
+            output::dim(&format!(
+                "{} · {}×{} · {}{}",
+                analysis.report.name,
+                LEGACY_PANORAMA.width,
+                LEGACY_PANORAMA.height,
+                options.transform.mode,
+                at.map(|s| format!(" · at {s:.1} s")).unwrap_or_default()
+            ))
+        );
+    } else {
+        println!("wrote {}", path.display());
     }
     Ok(exit::ok())
 }

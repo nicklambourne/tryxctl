@@ -160,6 +160,22 @@ enum MediaAction {
         #[command(flatten)]
         transform: media::TransformArgs,
     },
+    /// Render a frame exactly as the display would get it.
+    Preview {
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// Position in the video to preview, in seconds.
+        #[arg(long, value_name = "SECONDS")]
+        at: Option<f64>,
+        /// A 3×3 sheet of frames spread over the whole video.
+        #[arg(long)]
+        sheet: bool,
+        /// Write a PNG here instead of showing it in the terminal.
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        #[command(flatten)]
+        transform: media::TransformArgs,
+    },
     /// Delete media files from the display.
     Rm {
         #[arg(required = true, value_name = "NAME")]
@@ -206,6 +222,13 @@ fn main() -> ExitCode {
             } => media::upload(
                 cli.json, &session, &file, name, show, replace, dry_run, strict, &transform,
             ),
+            MediaAction::Preview {
+                file,
+                at,
+                sheet,
+                output,
+                transform,
+            } => media::preview(cli.json, &file, at, sheet, output, &transform),
             MediaAction::Rm { names } => media::rm(cli.json, &session, &names),
         },
         Command::Show { media, play } => show::run(cli.json, &session, &media, &play),
