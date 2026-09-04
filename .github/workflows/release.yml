@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux-x86_64:
+    # GitHub-hosted only; see ci.yml.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            musl-tools protobuf-compiler pkg-config file
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build a static binary
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked -p tryx --features static --target x86_64-unknown-linux-musl
+
+      - name: Generate the man page and completions
+        run: |
+          set -euo pipefail
+          bin=target/x86_64-unknown-linux-musl/release/tryx
+          file "$bin"
+          "$bin" --version
+          mkdir -p target/packaging
+          "$bin" manpage > target/packaging/tryx.1
+          "$bin" completions bash > target/packaging/tryx.bash
+          "$bin" completions zsh > target/packaging/_tryx
+          "$bin" completions fish > target/packaging/tryx.fish
+
+      - name: Package the tarball
+        id: tarball
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "tryx") | .version')
+          name="tryx-${version}-x86_64-unknown-linux-musl"
+          mkdir -p "dist/$name/udev" "dist/$name/completions"
+          cp target/x86_64-unknown-linux-musl/release/tryx "dist/$name/"
+          cp packaging/udev/*.rules "dist/$name/udev/"
+          cp target/packaging/tryx.1 "dist/$name/"
+          cp target/packaging/tryx.bash target/packaging/_tryx target/packaging/tryx.fish "dist/$name/completions/"
+          cp README.md LICENSE THIRD_PARTY.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build the .deb
+        run: |
+          set -euo pipefail
+          cargo install cargo-deb --locked
+          cargo deb -p tryx --no-build --no-strip --target x86_64-unknown-linux-musl
+          deb=$(ls target/x86_64-unknown-linux-musl/debian/*.deb)
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb"
+          cp "$deb" dist/
+          (cd dist && sha256sum ./*.deb > "$(basename "$deb").sha256")
+
+      - name: Smoke-test the packaged binary
+        run: |
+          set -euo pipefail
+          name="tryx-${{ steps.tarball.outputs.version }}-x86_64-unknown-linux-musl"
+          "dist/$name/tryx" doctor || test $? -eq 4
+          "dist/$name/tryx" devices --json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tryx-linux-x86_64
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/*.deb
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.deb dist/*.sha256 --title "$GITHUB_REF_NAME" --generate-notes

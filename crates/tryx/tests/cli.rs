@@ -266,3 +266,20 @@ fn media_preview_writes_a_png_when_not_on_a_terminal() {
         .unwrap();
     assert_eq!(sheet.status.code(), Some(2), "sheet needs a video");
 }
+
+#[test]
+fn completions_and_manpage_render() {
+    for shell in ["bash", "zsh", "fish"] {
+        let output = tryx().args(["completions", shell]).output().unwrap();
+        assert!(output.status.success(), "{shell}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("tryx"),
+            "{shell}"
+        );
+    }
+    let man = tryx().arg("manpage").output().unwrap();
+    assert!(man.status.success());
+    let text = String::from_utf8_lossy(&man.stdout);
+    assert!(text.contains(".TH tryx"), "{text}");
+    assert!(text.contains("doctor"), "{text}");
+}

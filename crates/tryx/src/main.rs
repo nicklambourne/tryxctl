@@ -11,7 +11,7 @@ mod show;
 mod state;
 mod tui;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use exit::{CommandResult, Failure};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -61,6 +61,14 @@ enum Command {
     },
     /// Open the interactive interface.
     Tui,
+    /// Print a shell completion script.
+    Completions {
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// Print the manual page in roff.
+    #[command(hide = true)]
+    Manpage,
     /// Play media already stored on the display.
     Show {
         /// File names as listed by `tryx media ls`.
@@ -236,6 +244,21 @@ fn main() -> ExitCode {
         },
         Command::Show { media, play } => show::run(cli.json, &session, &media, &play),
         Command::Tui => tui::run(&session),
+        Command::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "tryx", &mut std::io::stdout());
+            Ok(exit::ok())
+        }
+        Command::Manpage => {
+            let mut out = Vec::new();
+            match clap_mangen::Man::new(Cli::command()).render(&mut out) {
+                Ok(()) => {
+                    use std::io::Write;
+                    std::io::stdout().write_all(&out).ok();
+                    Ok(exit::ok())
+                }
+                Err(error) => Err(Failure::environment(error.to_string())),
+            }
+        }
         Command::Metrics { action } => match action {
             MetricsAction::Status => metrics::status(cli.json),
             MetricsAction::Set { args } => metrics::set(cli.json, &session, &args),

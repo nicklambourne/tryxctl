@@ -1,6 +1,7 @@
 [package]
 name = "tryx"
 description = "Command-line controller for TRYX cooler displays"
+authors = ["Nicholas Lambourne <dev@ndl.au>"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +10,8 @@ repository.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+clap_complete = "4"
+clap_mangen = "0.2"
 crossterm = "0.28"
 ratatui = "0.29"
 owo-colors = { workspace = true }
@@ -27,3 +30,30 @@ nix = { version = "0.30", features = ["user"] }
 [dev-dependencies]
 assert_cmd = { workspace = true }
 which = { workspace = true }
+
+[features]
+static = ["tryx-device/static"]
+
+# `cargo deb` packaging. The release workflow generates the man page and
+# completions into target/packaging before running it.
+[package.metadata.deb]
+section = "utils"
+priority = "optional"
+depends = "$auto"
+recommends = "ffmpeg, adb"
+extended-description = """Controls TRYX Panorama cooler displays from the terminal: upload images and
+videos with validation and conversion, manage the files on the display, set
+brightness, and show live CPU, GPU, and memory readings in the overlay."""
+maintainer-scripts = "packaging/deb"
+assets = [
+    ["target/release/tryx", "usr/bin/", "755"],
+    ["packaging/udev/70-tryx-access.rules", "lib/udev/rules.d/", "644"],
+    ["packaging/udev/71-tryx-legacy.rules", "lib/udev/rules.d/", "644"],
+    ["packaging/udev/99-tryx-printer.rules", "lib/udev/rules.d/", "644"],
+    ["target/packaging/tryx.1", "usr/share/man/man1/", "644"],
+    ["target/packaging/tryx.bash", "usr/share/bash-completion/completions/tryx", "644"],
+    ["target/packaging/_tryx", "usr/share/zsh/vendor-completions/", "644"],
+    ["target/packaging/tryx.fish", "usr/share/fish/vendor_completions.d/", "644"],
+    ["README.md", "usr/share/doc/tryx/", "644"],
+    ["THIRD_PARTY.md", "usr/share/doc/tryx/", "644"],
+]
