@@ -68,3 +68,13 @@ fn media_ls_needs_adb_and_a_display() {
         "{output:?}"
     );
 }
+
+#[test]
+fn show_rejects_unsafe_media_names_before_touching_a_device() {
+    let output = tryx()
+        .args(["show", "../etc/passwd", "--tty", "/nonexistent/ttyTRYX"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not safe"));
+}

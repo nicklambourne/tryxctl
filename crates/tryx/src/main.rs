@@ -6,6 +6,7 @@ mod info;
 mod legacy;
 mod media;
 mod output;
+mod show;
 
 use clap::{Parser, Subcommand};
 use exit::{CommandResult, Failure};
@@ -49,6 +50,15 @@ enum Command {
         #[command(subcommand)]
         action: MediaAction,
     },
+    /// Play media already stored on the display.
+    Show {
+        /// File names as listed by `tryx media ls`.
+        #[arg(required = true, value_name = "NAME")]
+        media: Vec<String>,
+        /// Playback mode.
+        #[arg(long, value_parser = ["Single", "Loop", "Shuffle"], default_value = "Single", value_name = "MODE")]
+        play: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -83,6 +93,7 @@ fn main() -> ExitCode {
         Command::Media {
             action: MediaAction::Ls,
         } => media::ls(cli.json, &session),
+        Command::Show { media, play } => show::run(cli.json, &session, &media, &play),
     };
     match result {
         Ok(code) => code,
