@@ -95,8 +95,8 @@ pub fn socket_path() -> PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| std::env::temp_dir().join(format!("tryx-{}", uid())));
-    dir.join("tryx").join("daemon.sock")
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("tryxctl-{}", uid())));
+    dir.join("tryxctl").join("daemon.sock")
 }
 
 fn uid() -> u32 {
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn frames_round_trip_over_a_socket() {
-        let dir = std::env::temp_dir().join(format!("tryx-ipc-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tryxctl-ipc-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.sock");
         let listener = UnixListener::bind(&path).unwrap();

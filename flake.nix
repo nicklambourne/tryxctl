@@ -17,19 +17,19 @@
       packages = forEach linux (pkgs:
         let
           inherit (pkgs) lib stdenv;
-          # Tools tryx runs at runtime: ffmpeg with libx264 for media, adb for
+          # Tools tryxctl runs at runtime: ffmpeg with libx264 for media, adb for
           # legacy-firmware transfers. Wrapped onto PATH so the package works
           # on a bare system.
           runtime = [ pkgs.ffmpeg ] ++ lib.optionals stdenv.hostPlatform.isLinux [ pkgs.android-tools ];
           native = stdenv.buildPlatform.canExecute stdenv.hostPlatform;
         in
         rec {
-          tryx = pkgs.rustPlatform.buildRustPackage {
-            pname = "tryx";
+          tryxctl = pkgs.rustPlatform.buildRustPackage {
+            pname = "tryxctl";
             inherit version;
             src = lib.cleanSource ./.;
             cargoLock.lockFile = ./Cargo.lock;
-            cargoBuildFlags = [ "-p" "tryx" ];
+            cargoBuildFlags = [ "-p" "tryxctl" ];
 
             nativeBuildInputs = [ pkgs.protobuf pkgs.pkg-config pkgs.installShellFiles pkgs.makeWrapper ];
             buildInputs = [ pkgs.libusb1 ];
@@ -37,28 +37,28 @@
 
             # The man page and completions come from the binary itself.
             postInstall = lib.optionalString native ''
-              $out/bin/tryx manpage > tryx.1
-              installManPage tryx.1
-              installShellCompletion --cmd tryx \
-                --bash <($out/bin/tryx completions bash) \
-                --zsh <($out/bin/tryx completions zsh) \
-                --fish <($out/bin/tryx completions fish)
+              $out/bin/tryxctl manpage > tryxctl.1
+              installManPage tryxctl.1
+              installShellCompletion --cmd tryxctl \
+                --bash <($out/bin/tryxctl completions bash) \
+                --zsh <($out/bin/tryxctl completions zsh) \
+                --fish <($out/bin/tryxctl completions fish)
             '' + ''
               install -Dm644 -t $out/lib/udev/rules.d packaging/udev/*.rules
             '';
             postFixup = ''
-              wrapProgram $out/bin/tryx --prefix PATH : ${lib.makeBinPath runtime}
+              wrapProgram $out/bin/tryxctl --prefix PATH : ${lib.makeBinPath runtime}
             '';
 
             meta = {
               description = "Command-line controller for TRYX cooler displays";
-              homepage = "https://github.com/nicklambourne/tryx-cli";
+              homepage = "https://github.com/nicklambourne/tryxctl";
               license = lib.licenses.mit;
-              mainProgram = "tryx";
+              mainProgram = "tryxctl";
               platforms = lib.platforms.unix;
             };
           };
-          default = tryx;
+          default = tryxctl;
         });
 
       devShells = forAll (pkgs: {

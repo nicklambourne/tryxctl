@@ -22,7 +22,7 @@ use std::process::ExitCode;
 
 /// Control TRYX cooler displays from the terminal.
 #[derive(Parser)]
-#[command(name = "tryx", version, about)]
+#[command(name = "tryxctl", version, about)]
 struct Cli {
     /// Emit machine-readable JSON instead of human output.
     #[arg(long, global = true)]
@@ -32,7 +32,7 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     tty: Option<String>,
 
-    /// USB id of a KANALI-firmware display (see `tryx devices`), bypassing discovery.
+    /// USB id of a KANALI-firmware display (see `tryxctl devices`), bypassing discovery.
     #[arg(long, global = true, value_name = "ID", conflicts_with = "tty")]
     device: Option<String>,
 
@@ -118,7 +118,7 @@ enum Command {
     },
     /// Play media already stored on the display.
     Show {
-        /// File names as listed by `tryx media ls`.
+        /// File names as listed by `tryxctl media ls`.
         #[arg(required = true, value_name = "NAME")]
         media: Vec<String>,
         /// Playback mode.
@@ -329,7 +329,12 @@ fn main() -> ExitCode {
         Command::Show { media, play } => show::run(cli.json, &session, &media, &play),
         Command::Tui => tui::run(&session),
         Command::Completions { shell } => {
-            clap_complete::generate(shell, &mut Cli::command(), "tryx", &mut std::io::stdout());
+            clap_complete::generate(
+                shell,
+                &mut Cli::command(),
+                "tryxctl",
+                &mut std::io::stdout(),
+            );
             Ok(exit::ok())
         }
         Command::Raw {

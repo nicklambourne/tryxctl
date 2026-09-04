@@ -307,7 +307,7 @@ fn check_devices(checks: &mut Vec<Check>) {
             "devices",
             Status::Warn,
             "no TRYX display connected",
-            Some("Connect the cooler's USB header, then run `tryx devices`."),
+            Some("Connect the cooler's USB header, then run `tryxctl devices`."),
         ));
         return;
     }

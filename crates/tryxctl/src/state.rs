@@ -24,7 +24,7 @@ pub fn path() -> Option<PathBuf> {
         .or_else(|| {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
         })?;
-    Some(base.join("tryx/display.json"))
+    Some(base.join("tryxctl/display.json"))
 }
 
 /// The saved state, or the default when there is none or it is unreadable.
@@ -61,7 +61,7 @@ mod tests {
 
     #[test]
     fn round_trips_and_tolerates_missing_or_partial_files() {
-        let dir = std::env::temp_dir().join(format!("tryx-state-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tryxctl-state-{}", std::process::id()));
         let file = dir.join("nested/display.json");
         assert_eq!(load_from(&file), DisplayState::default());
         let state = DisplayState {

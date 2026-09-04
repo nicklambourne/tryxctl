@@ -37,7 +37,7 @@ pub fn select(id_override: Option<&str>) -> Result<(String, Product), Failure> {
             .find(|device| device.id == id)
             .ok_or_else(|| {
                 Failure::device(format!(
-                    "no KANALI display with id {id}; see `tryx devices`"
+                    "no KANALI display with id {id}; see `tryxctl devices`"
                 ))
             })?;
         return ready(device);

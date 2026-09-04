@@ -46,5 +46,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
-      - run: nix build .#tryx --print-build-logs
-      - run: ./result/bin/tryx doctor || test $? -eq 4
+      - run: nix build .#tryxctl --print-build-logs
+      - run: ./result/bin/tryxctl doctor || test $? -eq 4

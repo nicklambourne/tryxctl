@@ -69,7 +69,7 @@ pub fn set(json: bool, session: &legacy::Session, args: &SetArgs) -> CommandResu
     }
     if screen_changed && saved.screen.media.is_empty() {
         return Err(Failure::usage(
-            "filters and sleep are part of the screen configuration and need media: run `tryx show` first",
+            "filters and sleep are part of the screen configuration and need media: run `tryxctl show` first",
         ));
     }
     let mut statuses = serde_json::Map::new();

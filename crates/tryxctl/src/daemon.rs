@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tryx_legacy::Client;
 use tryx_monitor::Monitor;
 
-pub const SERVICE_NAME: &str = "tryx-metrics.service";
+pub const SERVICE_NAME: &str = "tryxctl.service";
 
 type Envelope = (Request, Sender<Reply>);
 
@@ -33,7 +33,7 @@ pub fn run(session: &legacy::Session, interval: u64, quiet: bool) -> CommandResu
     }
     if ipc::available() {
         return Err(Failure::usage(
-            "a tryx daemon is already running on this socket",
+            "a tryxctl daemon is already running on this socket",
         ));
     }
     let mut status = DaemonStatus {
@@ -364,7 +364,7 @@ fn systemctl(args: &[&str]) -> Result<String, Failure> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Writes and starts a systemd user service running `tryx daemon`.
+/// Writes and starts a systemd user service running `tryxctl daemon`.
 pub fn install(
     json: bool,
     interval: u64,
@@ -389,7 +389,7 @@ pub fn install(
         .or_else(|| device.map(|d| format!(" --device {d}")))
         .unwrap_or_default();
     let text = format!(
-        "[Unit]\nDescription=TRYX display daemon (keepalive, metrics, commands)\nDocumentation=https://github.com/nicklambourne/tryx-cli\n\n[Service]\nExecStart={} daemon --interval {interval} --quiet{tty_arg}\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=TRYX display daemon (keepalive, metrics, commands)\nDocumentation=https://github.com/nicklambourne/tryxctl\n\n[Service]\nExecStart={} daemon --interval {interval} --quiet{tty_arg}\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
         binary.display()
     );
     std::fs::write(&unit, text)?;
@@ -450,7 +450,7 @@ pub fn uninstall(json: bool) -> CommandResult {
     Ok(exit::ok())
 }
 
-/// `tryx daemon status`: what the running daemon knows.
+/// `tryxctl daemon status`: what the running daemon knows.
 pub fn status(json: bool) -> CommandResult {
     let Some(reply) = ipc::call(&Request::Status)? else {
         return Err(Failure::device(format!(

@@ -1,12 +1,12 @@
 use assert_cmd::Command;
 
-fn tryx() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_tryx"))
+fn tryxctl() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_tryxctl"))
 }
 
 #[test]
 fn help_lists_commands() {
-    let output = tryx().arg("--help").assert().success();
+    let output = tryxctl().arg("--help").assert().success();
     let stdout = String::from_utf8_lossy(&output.get_output().stdout);
     assert!(stdout.contains("doctor"), "{stdout}");
     assert!(stdout.contains("devices"), "{stdout}");
@@ -14,7 +14,7 @@ fn help_lists_commands() {
 
 #[test]
 fn devices_json_has_both_device_lists() {
-    let output = tryx().args(["devices", "--json"]).assert().success();
+    let output = tryxctl().args(["devices", "--json"]).assert().success();
     let value: serde_json::Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
     assert!(value["printer_devices"].is_array());
     assert!(value["legacy_devices"].is_array());
@@ -22,7 +22,7 @@ fn devices_json_has_both_device_lists() {
 
 #[test]
 fn doctor_json_reports_checks_and_matches_exit_status() {
-    let output = tryx().args(["doctor", "--json"]).output().unwrap();
+    let output = tryxctl().args(["doctor", "--json"]).output().unwrap();
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let names: Vec<&str> = value["checks"]
         .as_array()
@@ -40,7 +40,7 @@ fn doctor_json_reports_checks_and_matches_exit_status() {
 
 #[test]
 fn info_on_a_missing_port_is_a_device_failure() {
-    let output = tryx()
+    let output = tryxctl()
         .args(["info", "--tty", "/nonexistent/ttyTRYX"])
         .output()
         .unwrap();
@@ -51,14 +51,14 @@ fn info_on_a_missing_port_is_a_device_failure() {
 
 #[test]
 fn display_set_without_a_setting_is_a_usage_error() {
-    let output = tryx().args(["display", "set"]).output().unwrap();
+    let output = tryxctl().args(["display", "set"]).output().unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("--brightness"));
 }
 
 #[test]
 fn media_ls_needs_adb_and_a_display() {
-    let output = tryx()
+    let output = tryxctl()
         .args(["media", "ls", "--tty", "/nonexistent/ttyTRYX"])
         .output()
         .unwrap();
@@ -71,7 +71,7 @@ fn media_ls_needs_adb_and_a_display() {
 
 #[test]
 fn show_rejects_unsafe_media_names_before_touching_a_device() {
-    let output = tryx()
+    let output = tryxctl()
         .args(["show", "../etc/passwd", "--tty", "/nonexistent/ttyTRYX"])
         .output()
         .unwrap();
@@ -83,7 +83,7 @@ fn show_rejects_unsafe_media_names_before_touching_a_device() {
 /// not installed (the check commands then fail with exit code 4 instead).
 fn sample_png(name: &str) -> Option<std::path::PathBuf> {
     let ffmpeg = which::which("ffmpeg").ok()?;
-    let dir = std::env::temp_dir().join(format!("tryx-cli-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("tryxctl-cli-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(name);
     let status = std::process::Command::new(ffmpeg)
@@ -107,14 +107,18 @@ fn sample_png(name: &str) -> Option<std::path::PathBuf> {
 #[test]
 fn media_check_reports_findings_and_strictness() {
     let Some(png) = sample_png("tiny.png") else {
-        let output = tryx()
+        let output = tryxctl()
             .args(["media", "check", "/nonexistent.png"])
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(4));
         return;
     };
-    let output = tryx().args(["media", "check"]).arg(&png).output().unwrap();
+    let output = tryxctl()
+        .args(["media", "check"])
+        .arg(&png)
+        .output()
+        .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{stdout}");
     assert!(stdout.contains("TRYX-M-RESOLUTION"), "{stdout}");
@@ -123,14 +127,14 @@ fn media_check_reports_findings_and_strictness() {
         "{stdout}"
     );
 
-    let strict = tryx()
+    let strict = tryxctl()
         .args(["media", "check", "--strict"])
         .arg(&png)
         .output()
         .unwrap();
     assert_eq!(strict.status.code(), Some(5));
 
-    let json = tryx()
+    let json = tryxctl()
         .args(["media", "check", "--json"])
         .arg(&png)
         .output()
@@ -139,7 +143,7 @@ fn media_check_reports_findings_and_strictness() {
     assert_eq!(value[0]["report"]["kind"], "image");
     assert_eq!(value[0]["plan"]["action"], "encode");
 
-    let missing = tryx()
+    let missing = tryxctl()
         .args(["media", "check", "/nonexistent/file.mp4"])
         .output()
         .unwrap();
@@ -152,7 +156,7 @@ fn media_convert_dry_run_prints_the_command() {
     let Some(png) = sample_png("dry.png") else {
         return;
     };
-    let output = tryx()
+    let output = tryxctl()
         .args(["media", "convert", "--dry-run", "--mode", "fill"])
         .arg(&png)
         .output()
@@ -161,7 +165,7 @@ fn media_convert_dry_run_prints_the_command() {
     assert_eq!(output.status.code(), Some(0), "{stdout}");
     assert!(stdout.contains("command: ffmpeg"), "{stdout}");
     assert!(stdout.contains("-frames:v 1"), "{stdout}");
-    let bad = tryx()
+    let bad = tryxctl()
         .args(["media", "convert", "--dry-run", "--mode", "squash"])
         .arg(&png)
         .output()
@@ -174,7 +178,7 @@ fn media_upload_dry_run_never_touches_a_device() {
     let Some(png) = sample_png("upload.png") else {
         return;
     };
-    let output = tryx()
+    let output = tryxctl()
         .args([
             "media",
             "upload",
@@ -195,7 +199,7 @@ fn media_upload_dry_run_never_touches_a_device() {
 
 #[test]
 fn metrics_set_validates_before_touching_a_device() {
-    let too_many = tryx()
+    let too_many = tryxctl()
         .args([
             "metrics",
             "set",
@@ -207,7 +211,7 @@ fn metrics_set_validates_before_touching_a_device() {
         .output()
         .unwrap();
     assert_eq!(too_many.status.code(), Some(2));
-    let bad_color = tryx()
+    let bad_color = tryxctl()
         .args([
             "metrics",
             "set",
@@ -227,7 +231,7 @@ fn metrics_set_validates_before_touching_a_device() {
 
 #[test]
 fn metrics_status_is_linux_only() {
-    let output = tryx()
+    let output = tryxctl()
         .args(["metrics", "status", "--json"])
         .output()
         .unwrap();
@@ -246,7 +250,7 @@ fn media_preview_writes_a_png_when_not_on_a_terminal() {
         return;
     };
     let out = png.with_file_name("preview-out.png");
-    let output = tryx()
+    let output = tryxctl()
         .args(["media", "preview", "--mode", "stretch", "-o"])
         .arg(&out)
         .arg(&png)
@@ -259,7 +263,7 @@ fn media_preview_writes_a_png_when_not_on_a_terminal() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(out.is_file());
-    let sheet = tryx()
+    let sheet = tryxctl()
         .args(["media", "preview", "--sheet"])
         .arg(&png)
         .output()
@@ -270,16 +274,16 @@ fn media_preview_writes_a_png_when_not_on_a_terminal() {
 #[test]
 fn completions_and_manpage_render() {
     for shell in ["bash", "zsh", "fish"] {
-        let output = tryx().args(["completions", shell]).output().unwrap();
+        let output = tryxctl().args(["completions", shell]).output().unwrap();
         assert!(output.status.success(), "{shell}");
         assert!(
-            String::from_utf8_lossy(&output.stdout).contains("tryx"),
+            String::from_utf8_lossy(&output.stdout).contains("tryxctl"),
             "{shell}"
         );
     }
-    let man = tryx().arg("manpage").output().unwrap();
+    let man = tryxctl().arg("manpage").output().unwrap();
     assert!(man.status.success());
     let text = String::from_utf8_lossy(&man.stdout);
-    assert!(text.contains(".TH tryx"), "{text}");
+    assert!(text.contains(".TH tryxctl"), "{text}");
     assert!(text.contains("doctor"), "{text}");
 }

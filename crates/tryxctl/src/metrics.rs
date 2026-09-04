@@ -196,7 +196,7 @@ pub struct SetArgs {
     /// Hardware name badges: cpu and/or gpu, comma-separated.
     #[arg(long, value_name = "LIST")]
     pub badges: Option<String>,
-    /// Media to show under the overlay; defaults to what `tryx show` last used.
+    /// Media to show under the overlay; defaults to what `tryxctl show` last used.
     #[arg(long, value_name = "NAME")]
     pub media: Vec<String>,
     /// Playback mode: single, loop, or shuffle.
@@ -273,7 +273,7 @@ pub fn set(json: bool, session: &legacy::Session, args: &SetArgs) -> CommandResu
     if connection.protocol() == legacy::Protocol::Legacy {
         if saved.screen.media.is_empty() {
             return Err(Failure::usage(
-                "the overlay is part of the screen configuration and needs media: pass --media NAME or run `tryx show` first",
+                "the overlay is part of the screen configuration and needs media: pass --media NAME or run `tryxctl show` first",
             ));
         }
         if let Some(label) = saved
@@ -403,7 +403,7 @@ pub fn push(
     require_linux()?;
     if !session.direct && crate::ipc::available() {
         return Err(Failure::usage(
-            "the tryx daemon is running and already pushes metrics; see `tryx daemon status`",
+            "the tryxctl daemon is running and already pushes metrics; see `tryxctl daemon status`",
         ));
     }
     let target = match session.select_backend()? {
@@ -511,7 +511,7 @@ fn fans_suffix(fans: &tryx_legacy::FanStatus) -> String {
     }
 }
 
-/// `tryx fans`: read the fan tachometers, optionally set the LCD fan speed.
+/// `tryxctl fans`: read the fan tachometers, optionally set the LCD fan speed.
 pub fn fans(
     json: bool,
     session: &legacy::Session,

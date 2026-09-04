@@ -341,7 +341,7 @@ impl WorkerState {
             plan.input.clone()
         } else {
             let staged =
-                std::env::temp_dir().join(format!("tryx-tui-{}-{}", std::process::id(), name));
+                std::env::temp_dir().join(format!("tryxctl-tui-{}-{}", std::process::id(), name));
             let events = self.events.clone();
             let progress_name = name.clone();
             encode::run(

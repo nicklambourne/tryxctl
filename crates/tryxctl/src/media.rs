@@ -622,8 +622,11 @@ pub fn upload(
     let staged: PathBuf = if plan.action == Action::Passthrough {
         plan.input.clone()
     } else {
-        let staged =
-            std::env::temp_dir().join(format!("tryx-upload-{}-{}", std::process::id(), plan.name));
+        let staged = std::env::temp_dir().join(format!(
+            "tryxctl-upload-{}-{}",
+            std::process::id(),
+            plan.name
+        ));
         run_plan(
             &ffmpeg,
             &ffprobe,
@@ -699,7 +702,7 @@ fn upload_kanali(
         plan.input.clone()
     } else {
         let staged =
-            std::env::temp_dir().join(format!("tryx-upload-{}-{}", std::process::id(), remote));
+            std::env::temp_dir().join(format!("tryxctl-upload-{}-{}", std::process::id(), remote));
         run_plan(
             ffmpeg,
             ffprobe,
@@ -891,7 +894,7 @@ pub fn preview(
     let path = match &output {
         Some(path) => path.clone(),
         None if inline => {
-            std::env::temp_dir().join(format!("tryx-preview-{}.png", std::process::id()))
+            std::env::temp_dir().join(format!("tryxctl-preview-{}.png", std::process::id()))
         }
         None => {
             let stem = file

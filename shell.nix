@@ -9,7 +9,7 @@ pkgs.mkShellNoCC {
     protobuf # protoc, consumed by prost-build
     pkg-config
     libusb1
-    ffmpeg # must carry the libx264 encoder; `tryx doctor` verifies it
+    ffmpeg # must carry the libx264 encoder; `tryxctl doctor` verifies it
   ] ++ lib.optionals stdenv.isLinux [
     android-tools # adb, media transfer on the legacy cm01 firmware
   ];

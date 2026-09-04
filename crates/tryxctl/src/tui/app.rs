@@ -343,7 +343,7 @@ impl App {
             ]),
         ];
         frame.render_widget(
-            Paragraph::new(text).block(Block::bordered().title(" tryx ")),
+            Paragraph::new(text).block(Block::bordered().title(" tryxctl ")),
             area,
         );
     }

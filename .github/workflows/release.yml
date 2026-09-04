@@ -48,31 +48,31 @@ jobs:
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
-        run: cargo build --release --locked -p tryx --features static --target ${{ matrix.target }}
+        run: cargo build --release --locked -p tryxctl --features static --target ${{ matrix.target }}
 
       - name: Generate the man page and completions
         run: |
           set -euo pipefail
-          bin=target/${{ matrix.target }}/release/tryx
+          bin=target/${{ matrix.target }}/release/tryxctl
           file "$bin"
           "$bin" --version
           mkdir -p target/packaging
-          "$bin" manpage > target/packaging/tryx.1
-          "$bin" completions bash > target/packaging/tryx.bash
+          "$bin" manpage > target/packaging/tryxctl.1
+          "$bin" completions bash > target/packaging/tryxctl.bash
           "$bin" completions zsh > target/packaging/_tryx
-          "$bin" completions fish > target/packaging/tryx.fish
+          "$bin" completions fish > target/packaging/tryxctl.fish
 
       - name: Package the tarball
         id: tarball
         run: |
           set -euo pipefail
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "tryx") | .version')
-          name="tryx-${version}-${{ matrix.target }}"
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "tryxctl") | .version')
+          name="tryxctl-${version}-${{ matrix.target }}"
           mkdir -p "dist/$name/udev" "dist/$name/completions"
-          cp target/${{ matrix.target }}/release/tryx "dist/$name/"
+          cp target/${{ matrix.target }}/release/tryxctl "dist/$name/"
           cp packaging/udev/*.rules "dist/$name/udev/"
-          cp target/packaging/tryx.1 "dist/$name/"
-          cp target/packaging/tryx.bash target/packaging/_tryx target/packaging/tryx.fish "dist/$name/completions/"
+          cp target/packaging/tryxctl.1 "dist/$name/"
+          cp target/packaging/tryxctl.bash target/packaging/_tryxctl target/packaging/tryxctl.fish "dist/$name/completions/"
           cp README.md LICENSE THIRD_PARTY.md "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
@@ -82,7 +82,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo install cargo-deb --locked
-          cargo deb -p tryx --no-build --no-strip --target ${{ matrix.target }}
+          cargo deb -p tryxctl --no-build --no-strip --target ${{ matrix.target }}
           deb=$(ls target/${{ matrix.target }}/debian/*.deb)
           dpkg-deb --info "$deb"
           dpkg-deb --contents "$deb"
@@ -92,16 +92,16 @@ jobs:
       - name: Smoke-test the packaged binary
         run: |
           set -euo pipefail
-          name="tryx-${{ steps.tarball.outputs.version }}-${{ matrix.target }}"
-          "dist/$name/tryx" doctor || test $? -eq 4
-          "dist/$name/tryx" devices --json
+          name="tryxctl-${{ steps.tarball.outputs.version }}-${{ matrix.target }}"
+          "dist/$name/tryxctl" doctor || test $? -eq 4
+          "dist/$name/tryxctl" devices --json
           # ffmpeg is installed above, so a non-media file is rejected (5),
           # not reported as a missing tool (4).
-          "dist/$name/tryx" media check --target kanali-turris README.md || test $? -eq 5
+          "dist/$name/tryxctl" media check --target kanali-turris README.md || test $? -eq 5
 
       - uses: actions/upload-artifact@v4
         with:
-          name: tryx-linux-${{ matrix.arch }}
+          name: tryxctl-linux-${{ matrix.arch }}
           path: |
             dist/*.tar.gz
             dist/*.sha256
@@ -114,7 +114,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: tryx-linux-*
+          pattern: tryxctl-linux-*
           path: dist
           merge-multiple: true
 

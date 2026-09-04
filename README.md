@@ -1,4 +1,4 @@
-# tryx-cli
+# tryxctl
 
 Command-line and terminal-UI controller for TRYX cooler displays (Panorama SE,
 Panorama, Turris 620) on Linux. No Qt, no daemon, one binary.
@@ -16,50 +16,50 @@ protocol tested against a scripted fake device, not yet against hardware.
 Every release ships static Linux binaries and Debian packages for x86_64
 and aarch64, built by `.github/workflows/release.yml`.
 
-- **Tarball**: unpack it, copy `tryx` somewhere on your PATH, copy `udev/*.rules`
+- **Tarball**: unpack it, copy `tryxctl` somewhere on your PATH, copy `udev/*.rules`
   to `/etc/udev/rules.d/`, run `sudo udevadm control --reload-rules`, and add
   yourself to the `dialout` and `plugdev` groups (log in again afterwards).
-- **Debian/Ubuntu**: `sudo apt install ./tryx_*.deb` installs the binary, the
+- **Debian/Ubuntu**: `sudo apt install ./tryxctl_*.deb` installs the binary, the
   udev rules, the man page, and shell completions, and reloads udev. Add
   yourself to `dialout` and `plugdev`.
 
-- **Nix**: `nix profile install github:nicklambourne/tryx-cli` (or
+- **Nix**: `nix profile install github:nicklambourne/tryxctl` (or
   `nix build` in a checkout). The package wraps `ffmpeg` and `adb` onto the
   binary's PATH and ships the udev rules under `lib/udev/rules.d` for
   `services.udev.packages` on NixOS.
 
-At runtime `tryx` needs `ffmpeg` (with the libx264 encoder) and, for the
+At runtime `tryxctl` needs `ffmpeg` (with the libx264 encoder) and, for the
 legacy firmware, `adb` on the PATH; the Debian package recommends both.
-`tryx doctor` reports anything missing.
+`tryxctl doctor` reports anything missing.
 
 ## Usage
 
 ```bash
-tryx doctor                                  # tools, permissions, connected displays
-tryx devices                                 # what is connected and how
-tryx info                                    # identify the display
-tryx media ls                                # files on the display and free space
-tryx media check clip.mp4                    # what would change, and why
-tryx media check --target kanali-turris a.png  # ...for a display that is not connected
-tryx media upload clip.mp4 --show            # validate, convert if needed, upload, play
-tryx media preview clip.mp4 --at 5           # a frame exactly as the display gets it
-tryx show clip.mp4 --play Loop               # play something already on the display
-tryx display set --brightness 70
-tryx metrics set --labels cpu-temp,gpu-temp,cpu-usage --badges cpu,gpu
-tryx daemon install                          # the daemon: keepalive, live metrics, and every
+tryxctl doctor                                  # tools, permissions, connected displays
+tryxctl devices                                 # what is connected and how
+tryxctl info                                    # identify the display
+tryxctl media ls                                # files on the display and free space
+tryxctl media check clip.mp4                    # what would change, and why
+tryxctl media check --target kanali-turris a.png  # ...for a display that is not connected
+tryxctl media upload clip.mp4 --show            # validate, convert if needed, upload, play
+tryxctl media preview clip.mp4 --at 5           # a frame exactly as the display gets it
+tryxctl show clip.mp4 --play Loop               # play something already on the display
+tryxctl display set --brightness 70
+tryxctl metrics set --labels cpu-temp,gpu-temp,cpu-usage --badges cpu,gpu
+tryxctl daemon install                          # the daemon: keepalive, live metrics, and every
                                              # command below routes through it (systemd user service)
-tryx daemon status                           # what it knows: device, fans, pushes, last error
-tryx fans --watch 5                          # LCD fan and pump RPM from the display
-tryx fans --lcd-speed 40                     # fixed display-block fan speed
-tryx display set --filter smoke --filter-opacity 60
-tryx display set --sleep on                  # let the panel sleep with the host
-tryx display reboot
-tryx tui                                     # all of the above, interactively
-tryx completions zsh > ~/.zfunc/_tryx
+tryxctl daemon status                           # what it knows: device, fans, pushes, last error
+tryxctl fans --watch 5                          # LCD fan and pump RPM from the display
+tryxctl fans --lcd-speed 40                     # fixed display-block fan speed
+tryxctl display set --filter smoke --filter-opacity 60
+tryxctl display set --sleep on                  # let the panel sleep with the host
+tryxctl display reboot
+tryxctl tui                                     # all of the above, interactively
+tryxctl completions zsh > ~/.zfunc/_tryxctl
 ```
 
 The panel goes dark about a minute after the host stops talking to it, so
-`tryx daemon install` is the normal way to run things: the daemon owns the
+`tryxctl daemon install` is the normal way to run things: the daemon owns the
 serial port, keeps the panel awake with live readings, restores the saved
 screen on start, and answers the other commands over a socket so they never
 compete for the port. Without a daemon every command opens the port itself;
@@ -70,7 +70,7 @@ again) or the service will not see the new group.
 Every command takes `--json` for machine-readable output and `-v` to dump the
 frames exchanged with the display. With several displays attached, `--tty`
 picks a legacy serial port and `--device` a KANALI USB id (both listed by
-`tryx devices`). Exit codes: 2 usage, 3 device, 4 environment, 5 media
+`tryxctl devices`). Exit codes: 2 usage, 3 device, 4 environment, 5 media
 rejected.
 
 ### Firmware differences
@@ -93,7 +93,7 @@ direnv allow && cargo build
 ```
 
 The shell provides `protoc`, `libusb`, and an `ffmpeg` with the `libx264`
-encoder. Without nix, install those three yourself; `tryx doctor` reports
+encoder. Without nix, install those three yourself; `tryxctl doctor` reports
 what is missing.
 
 ## Device access on Linux
