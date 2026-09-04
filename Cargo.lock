@@ -2041,6 +2041,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tryx-kanali"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "rusb",
+ "serde",
+ "thiserror",
+ "tryx-device",
+ "tryx-proto",
+]
+
+[[package]]
 name = "tryx-legacy"
 version = "0.1.0"
 dependencies = [

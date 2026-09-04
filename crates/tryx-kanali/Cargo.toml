@@ -1,0 +1,15 @@
+[package]
+name = "tryx-kanali"
+description = "KANALI printer-class USB protocol for TRYX displays"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+prost = { workspace = true }
+rusb = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tryx-device = { path = "../tryx-device" }
+tryx-proto = { path = "../tryx-proto" }

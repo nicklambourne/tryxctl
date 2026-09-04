@@ -286,7 +286,7 @@ fn read_strings(
 
 /// Finds the single printer-class interface exposing exactly one bulk IN and
 /// one bulk OUT endpoint, as the upstream transport requires.
-fn find_printer_interface(config: &rusb::ConfigDescriptor) -> InterfaceStatus {
+pub fn find_printer_interface(config: &rusb::ConfigDescriptor) -> InterfaceStatus {
     let mut matches = Vec::new();
     for interface in config.interfaces() {
         for setting in interface.descriptors() {
