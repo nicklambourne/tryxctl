@@ -37,9 +37,17 @@ tryx show clip.mp4 --play Loop               # play something already on the dis
 tryx display set --brightness 70
 tryx metrics set --labels cpu-temp,gpu-temp,cpu-usage --badges cpu,gpu
 tryx metrics push --interval 2               # send live readings until interrupted
+tryx metrics install                         # keep them live from boot (systemd user service)
 tryx tui                                     # all of the above, interactively
 tryx completions zsh > ~/.zfunc/_tryx
 ```
+
+The display shows its built-in animation whenever no host is talking to it, so
+`tryx metrics install` is the way to keep your media and overlay up
+permanently; it restores the saved screen on start. After adding yourself to
+`dialout`, restart your systemd user manager (log out fully, or
+`systemctl --user exit` and log in again) or the service will not see the
+new group.
 
 Every command takes `--json` for machine-readable output and `-v` to dump the
 frames exchanged with the display. Exit codes: 2 usage, 3 device, 4
