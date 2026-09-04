@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["crates/tryx", "crates/tryx-device", "crates/tryx-proto"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/nicklambourne/tryx-cli"
+
+[workspace.dependencies]
+anyhow = "1"
+assert_cmd = "2"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+owo-colors = { version = "4", features = ["supports-colors"] }
+predicates = "3"
+prost = "0.14"
+prost-build = "0.14"
+rusb = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+which = "7"

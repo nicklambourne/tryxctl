@@ -1,0 +1,22 @@
+[package]
+name = "tryx"
+description = "Command-line controller for TRYX cooler displays"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+owo-colors = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tryx-device = { path = "../tryx-device" }
+which = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.30", features = ["user"] }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
