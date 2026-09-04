@@ -19,7 +19,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            musl-tools protobuf-compiler pkg-config file
+            musl-tools linux-libc-dev protobuf-compiler pkg-config file
+          # libusb's Linux backend includes kernel UAPI headers, which
+          # Ubuntu's musl-gcc does not see; expose them to it.
+          for dir in linux asm asm-generic; do
+            sudo ln -sfn "/usr/include/$dir" "/usr/include/x86_64-linux-musl/$dir"
+          done
 
       - uses: dtolnay/rust-toolchain@stable
         with:
