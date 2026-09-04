@@ -256,24 +256,28 @@ pub fn set(json: bool, session: &legacy::Session, args: &SetArgs) -> CommandResu
         ));
     }
 
-    let names = hardware_names(
-        args.cpu_name.clone().or(saved.cpu_name.clone()),
-        args.gpu_name.clone().or(saved.gpu_name.clone()),
-    );
-    saved.cpu_name = Some(names.0.clone());
-    saved.gpu_name = Some(names.1.clone());
+    if let Some(cpu) = &args.cpu_name {
+        saved.cpu_name = Some(cpu.clone());
+    }
+    if let Some(gpu) = &args.gpu_name {
+        saved.gpu_name = Some(gpu.clone());
+    }
     let unit = if args.fahrenheit {
         "Fahrenheit"
     } else {
         "Celsius"
     };
+    saved.temperature_unit = Some(unit.to_string());
+    let names = legacy::hardware_names(&mut saved);
 
     let target = session.select()?;
     let mut client = session.open(&target)?;
     client.send_spec(&names.0, &names.1)?;
     client.set_temperature_unit(unit)?;
-    let response = client.set_screen_config(&saved.screen)?;
-    client.set_sysinfo_display(&saved.screen.sysinfo_display)?;
+    let response = legacy::apply_screen(&mut client, &mut saved)?;
+    if saved.screen.sysinfo_display.is_empty() {
+        client.set_sysinfo_display(&[])?;
+    }
     if let Err(error) = state::save(&saved) {
         eprintln!("warning: could not save the display state: {error}");
     }
@@ -315,24 +319,6 @@ pub fn set(json: bool, session: &legacy::Session, args: &SetArgs) -> CommandResu
         );
     }
     Ok(exit::ok())
-}
-
-/// CPU and GPU names for the badges: given, saved, or detected.
-fn hardware_names(cpu: Option<String>, gpu: Option<String>) -> (String, String) {
-    if let (Some(cpu), Some(gpu)) = (&cpu, &gpu) {
-        return (cpu.clone(), gpu.clone());
-    }
-    let detected = if Monitor::supported() {
-        Monitor::new().sample()
-    } else {
-        Sample::default()
-    };
-    (
-        cpu.or(detected.cpu.name)
-            .unwrap_or_else(|| "CPU".to_string()),
-        gpu.or(detected.gpu.name)
-            .unwrap_or_else(|| "GPU".to_string()),
-    )
 }
 
 pub fn pc_info(sample: &Sample) -> PcInfo {

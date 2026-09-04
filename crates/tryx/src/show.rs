@@ -20,7 +20,7 @@ pub fn run(
     saved.screen.play_mode = play_mode.to_string();
     let target = session.select()?;
     let mut client = session.open(&target)?;
-    let response = client.set_screen_config(&saved.screen)?;
+    let response = legacy::apply_screen(&mut client, &mut saved)?;
     if let Err(error) = state::save(&saved) {
         eprintln!("warning: could not save the display state: {error}");
     }

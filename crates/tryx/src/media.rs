@@ -595,7 +595,7 @@ fn push_and_show(
         let mut saved = crate::state::load();
         saved.screen.media = vec![plan.name.clone()];
         let mut client = session.open(target)?;
-        client.set_screen_config(&saved.screen)?;
+        legacy::apply_screen(&mut client, &mut saved)?;
         if let Err(error) = crate::state::save(&saved) {
             eprintln!("warning: could not save the display state: {error}");
         }

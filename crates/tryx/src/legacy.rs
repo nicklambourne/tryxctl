@@ -1,8 +1,57 @@
 //! Selecting and opening a display that runs the legacy cm01 firmware.
 
 use crate::exit::Failure;
+use crate::state::DisplayState;
 use tryx_device::discovery::{Access, LegacyDevice};
-use tryx_legacy::Client;
+use tryx_legacy::{Client, LegacyError, Response};
+use tryx_monitor::Monitor;
+
+/// Brightness the vendor app assumes when nothing was ever set.
+pub const DEFAULT_BRIGHTNESS: u8 = 75;
+
+/// Sends the saved screen configuration the way the vendor app does:
+/// `waterBlockScreenId` (twice, with the waterfall mode), the overlay
+/// labels, and then the full `config` with `waterBlockScreen.enable`, the
+/// brightness, and the hardware names. The last step is what makes the
+/// firmware actually switch away from its built-in content.
+pub fn apply_screen(
+    client: &mut Client,
+    saved: &mut DisplayState,
+) -> Result<Response, LegacyError> {
+    let (cpu, gpu) = hardware_names(saved);
+    client.set_screen_config(&saved.screen)?;
+    if !saved.screen.sysinfo_display.is_empty() {
+        client.set_sysinfo_display(&saved.screen.sysinfo_display)?;
+    }
+    let brightness = saved.brightness.unwrap_or(DEFAULT_BRIGHTNESS);
+    let unit = saved.temperature_unit.as_deref().unwrap_or("Celsius");
+    client.send_full_config(&saved.screen, &cpu, &gpu, brightness, unit)
+}
+
+/// CPU and GPU names for the badges: saved, or detected once and saved.
+pub fn hardware_names(saved: &mut DisplayState) -> (String, String) {
+    if let (Some(cpu), Some(gpu)) = (&saved.cpu_name, &saved.gpu_name) {
+        return (cpu.clone(), gpu.clone());
+    }
+    let detected = if Monitor::supported() {
+        Monitor::new().sample()
+    } else {
+        Default::default()
+    };
+    let cpu = saved
+        .cpu_name
+        .clone()
+        .or(detected.cpu.name)
+        .unwrap_or_else(|| "CPU".to_string());
+    let gpu = saved
+        .gpu_name
+        .clone()
+        .or(detected.gpu.name)
+        .unwrap_or_else(|| "GPU".to_string());
+    saved.cpu_name = Some(cpu.clone());
+    saved.gpu_name = Some(gpu.clone());
+    (cpu, gpu)
+}
 
 /// Global options that pick and configure the display connection.
 pub struct Session {

@@ -190,9 +190,7 @@ impl WorkerState {
         let mut saved = state::load();
         saved.screen.media = media.clone();
         saved.screen.play_mode = play.clone();
-        self.client()?
-            .set_screen_config(&saved.screen)
-            .map_err(|e| e.to_string())?;
+        crate::legacy::apply_screen(self.client()?, &mut saved).map_err(|e| e.to_string())?;
         let _ = state::save(&saved);
         self.emit(Event::Log(format!("showing {} ({play})", media.join(", "))));
         Ok(())
@@ -220,27 +218,14 @@ impl WorkerState {
 
     fn overlay(&mut self, screen: ScreenConfig) -> Result<(), String> {
         let mut saved = state::load();
-        let (cpu, gpu) = match (saved.cpu_name.clone(), saved.gpu_name.clone()) {
-            (Some(cpu), Some(gpu)) => (cpu, gpu),
-            _ => {
-                let sample = self.monitor.sample();
-                (
-                    sample.cpu.name.unwrap_or_else(|| "CPU".into()),
-                    sample.gpu.name.unwrap_or_else(|| "GPU".into()),
-                )
-            }
-        };
-        saved.cpu_name = Some(cpu.clone());
-        saved.gpu_name = Some(gpu.clone());
         saved.screen = screen;
+        let (cpu, gpu) = crate::legacy::hardware_names(&mut saved);
         let client = self.client()?;
         client.send_spec(&cpu, &gpu).map_err(|e| e.to_string())?;
-        client
-            .set_screen_config(&saved.screen)
-            .map_err(|e| e.to_string())?;
-        client
-            .set_sysinfo_display(&saved.screen.sysinfo_display)
-            .map_err(|e| e.to_string())?;
+        crate::legacy::apply_screen(client, &mut saved).map_err(|e| e.to_string())?;
+        if saved.screen.sysinfo_display.is_empty() {
+            client.set_sysinfo_display(&[]).map_err(|e| e.to_string())?;
+        }
         let _ = state::save(&saved);
         self.emit(Event::Log(if saved.screen.sysinfo_display.is_empty() {
             "overlay cleared".to_string()
