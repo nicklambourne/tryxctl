@@ -3,15 +3,18 @@
 Command-line and terminal-UI controller for TRYX cooler displays (Panorama SE,
 Panorama, Turris 620) on Linux. No Qt, no daemon, one binary.
 
-Status: alpha. Works on a Panorama SE running the original cm01 firmware:
+Status: alpha. Verified on a Panorama SE running the original cm01 firmware:
 media upload with validation and conversion, file management, brightness,
-a live metrics overlay, previews, and a terminal interface. Displays on the
-newer KANALI firmware are detected but not driven yet.
+filters, a live metrics overlay, fan readings, previews, and a terminal
+interface. Displays on the newer KANALI firmware (printer-class USB) are
+driven through the same commands: catalog, upload, removal, brightness,
+media selection, and the overlay. That backend is a port of the upstream
+protocol tested against a scripted fake device, not yet against hardware.
 
 ## Install
 
-Every release ships a static Linux binary and a Debian package, built by
-`.github/workflows/release.yml`.
+Every release ships static Linux binaries and Debian packages for x86_64
+and aarch64, built by `.github/workflows/release.yml`.
 
 - **Tarball**: unpack it, copy `tryx` somewhere on your PATH, copy `udev/*.rules`
   to `/etc/udev/rules.d/`, run `sudo udevadm control --reload-rules`, and add
@@ -20,8 +23,14 @@ Every release ships a static Linux binary and a Debian package, built by
   udev rules, the man page, and shell completions, and reloads udev. Add
   yourself to `dialout` and `plugdev`.
 
-At runtime `tryx` needs `ffmpeg` (with the libx264 encoder) and `adb` on the
-PATH; the package recommends both. `tryx doctor` reports anything missing.
+- **Nix**: `nix profile install github:nicklambourne/tryx-cli` (or
+  `nix build` in a checkout). The package wraps `ffmpeg` and `adb` onto the
+  binary's PATH and ships the udev rules under `lib/udev/rules.d` for
+  `services.udev.packages` on NixOS.
+
+At runtime `tryx` needs `ffmpeg` (with the libx264 encoder) and, for the
+legacy firmware, `adb` on the PATH; the Debian package recommends both.
+`tryx doctor` reports anything missing.
 
 ## Usage
 
@@ -31,6 +40,7 @@ tryx devices                                 # what is connected and how
 tryx info                                    # identify the display
 tryx media ls                                # files on the display and free space
 tryx media check clip.mp4                    # what would change, and why
+tryx media check --target kanali-turris a.png  # ...for a display that is not connected
 tryx media upload clip.mp4 --show            # validate, convert if needed, upload, play
 tryx media preview clip.mp4 --at 5           # a frame exactly as the display gets it
 tryx show clip.mp4 --play Loop               # play something already on the display
@@ -58,12 +68,25 @@ systemd user manager (log out fully, or `systemctl --user exit` and log in
 again) or the service will not see the new group.
 
 Every command takes `--json` for machine-readable output and `-v` to dump the
-frames exchanged with the display. Exit codes: 2 usage, 3 device, 4
-environment, 5 media rejected.
+frames exchanged with the display. With several displays attached, `--tty`
+picks a legacy serial port and `--device` a KANALI USB id (both listed by
+`tryx devices`). Exit codes: 2 usage, 3 device, 4 environment, 5 media
+rejected.
+
+### Firmware differences
+
+| | Legacy cm01 (serial + ADB) | KANALI (printer-class USB) |
+|---|---|---|
+| Media | MP4, 1920×960 | raw H.264 at 2240×1080 (Panorama) or 1280×720 in the MXHD header (Turris 620); still images become loops |
+| Names | as uploaded | suffixed `.h264_2240x1080` / `.h264_1280x720` |
+| Overlay | up to 3 labels, incl. voltages and disk/motherboard temperature | up to 3 labels, incl. CPU/GPU power; no voltages |
+| Keepalive | sysinfo push every few seconds | ping and overlay lease every 2 s |
+| Filters, sleep, fans, reboot | yes | not in the protocol |
+| Storage | `df` over ADB | none; the catalog lists sizes |
 
 ## Build from source
 
-Enter the development shell (nix + direnv) and build:
+Enter the development shell (nix + direnv, or `nix develop`) and build:
 
 ```bash
 direnv allow && cargo build
