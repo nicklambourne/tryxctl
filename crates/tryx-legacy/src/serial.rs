@@ -160,14 +160,16 @@ mod tests {
             let reply = frame::wrap(b"1 OK\r\nContentType=json\r\n\r\n{\"productId\":\"cm01_se\"}")
                 .unwrap();
             device.write_all(&reply).expect("device write");
-            request
+            // Hand the master back: on Linux, closing it discards whatever
+            // the slave has not read yet.
+            (request, device)
         });
 
         let response = link.request("conn", "").expect("response");
         assert_eq!(response.status, "OK");
         assert_eq!(response.json.unwrap()["productId"], "cm01_se");
 
-        let request = device_side.join().unwrap();
+        let (request, _device) = device_side.join().unwrap();
         assert_eq!(request.version, "POST");
         assert_eq!(request.status, "conn");
         assert!(request.raw.contains("AckNumber=1\r\n"), "{}", request.raw);
