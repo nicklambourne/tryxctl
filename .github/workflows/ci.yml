@@ -11,8 +11,9 @@ concurrency:
 
 jobs:
   check:
-    # GitHub-hosted, always. This repository is public: a pull request from a
-    # fork is attacker-authored code and must never reach a self-hosted runner.
+    # GitHub-hosted, always, even while the repository is private: the moment
+    # it goes public, a pull request from a fork is attacker-authored code and
+    # must never reach a self-hosted runner.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
