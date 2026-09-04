@@ -5,8 +5,10 @@ mod exit;
 mod info;
 mod legacy;
 mod media;
+mod metrics;
 mod output;
 mod show;
+mod state;
 
 use clap::{Parser, Subcommand};
 use exit::{CommandResult, Failure};
@@ -51,6 +53,11 @@ enum Command {
         #[command(subcommand)]
         action: MediaAction,
     },
+    /// Show live host metrics on the display.
+    Metrics {
+        #[command(subcommand)]
+        action: MetricsAction,
+    },
     /// Play media already stored on the display.
     Show {
         /// File names as listed by `tryx media ls`.
@@ -69,6 +76,32 @@ enum DisplayAction {
         /// Backlight brightness, 0 to 100.
         #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u8).range(0..=100))]
         brightness: Option<u8>,
+    },
+}
+
+// Command enums are built once; the size difference between variants
+// does not matter.
+#[allow(clippy::large_enum_variant)]
+#[derive(Subcommand)]
+enum MetricsAction {
+    /// Print what this host can measure.
+    Status,
+    /// Configure the overlay: which metrics, where, and in what colour.
+    Set {
+        #[command(flatten)]
+        args: metrics::SetArgs,
+    },
+    /// Send host metrics to the display, repeatedly until interrupted.
+    Push {
+        /// Seconds between samples.
+        #[arg(long, value_name = "SECONDS", default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=60))]
+        interval: u64,
+        /// Send one sample and exit.
+        #[arg(long)]
+        once: bool,
+        /// Do not print each sample.
+        #[arg(short, long)]
+        quiet: bool,
     },
 }
 
@@ -176,6 +209,15 @@ fn main() -> ExitCode {
             MediaAction::Rm { names } => media::rm(cli.json, &session, &names),
         },
         Command::Show { media, play } => show::run(cli.json, &session, &media, &play),
+        Command::Metrics { action } => match action {
+            MetricsAction::Status => metrics::status(cli.json),
+            MetricsAction::Set { args } => metrics::set(cli.json, &session, &args),
+            MetricsAction::Push {
+                interval,
+                once,
+                quiet,
+            } => metrics::push(cli.json, &session, interval, once, quiet),
+        },
     };
     match result {
         Ok(code) => code,

@@ -1,7 +1,6 @@
 use crate::exit::{self, CommandResult, Failure};
-use crate::legacy;
+use crate::{legacy, state};
 use serde_json::json;
-use tryx_legacy::ScreenConfig;
 use tryx_legacy::adb::is_safe_media_name;
 
 /// Selects media already stored on the display and starts playing it.
@@ -16,14 +15,15 @@ pub fn run(
             "media name {name:?} is not safe: use ASCII letters, digits, '.', '_' or '-' and no leading dot"
         )));
     }
-    let config = ScreenConfig {
-        media: media.to_vec(),
-        play_mode: play_mode.to_string(),
-        ..ScreenConfig::default()
-    };
+    let mut saved = state::load();
+    saved.screen.media = media.to_vec();
+    saved.screen.play_mode = play_mode.to_string();
     let target = session.select()?;
     let mut client = session.open(&target)?;
-    let response = client.set_screen_config(&config)?;
+    let response = client.set_screen_config(&saved.screen)?;
+    if let Err(error) = state::save(&saved) {
+        eprintln!("warning: could not save the display state: {error}");
+    }
     if json {
         println!(
             "{}",

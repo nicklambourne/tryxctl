@@ -1,5 +1,5 @@
 use crate::exit::{self, CommandResult, Failure};
-use crate::legacy;
+use crate::{legacy, state};
 use serde_json::json;
 
 pub fn set(json: bool, session: &legacy::Session, brightness: Option<u8>) -> CommandResult {
@@ -9,6 +9,11 @@ pub fn set(json: bool, session: &legacy::Session, brightness: Option<u8>) -> Com
     let target = session.select()?;
     let mut client = session.open(&target)?;
     let response = client.set_brightness(brightness)?;
+    let mut saved = state::load();
+    saved.brightness = Some(brightness);
+    if let Err(error) = state::save(&saved) {
+        eprintln!("warning: could not save the display state: {error}");
+    }
     if json {
         println!(
             "{}",

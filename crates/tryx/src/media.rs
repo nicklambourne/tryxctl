@@ -4,7 +4,6 @@ use crate::output;
 use owo_colors::{OwoColorize, Stream};
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use tryx_legacy::ScreenConfig;
 use tryx_legacy::adb::{self, Adb, is_safe_media_name};
 use tryx_media::check::{self, Finding, Options, Report, Severity, Source};
 use tryx_media::plan::Action;
@@ -592,11 +591,13 @@ fn push_and_show(
     let sha256 = encode::sha256_file(staged)?;
     adb.push(staged, &plan.name)?;
     if show {
+        let mut saved = crate::state::load();
+        saved.screen.media = vec![plan.name.clone()];
         let mut client = session.open(target)?;
-        client.set_screen_config(&ScreenConfig {
-            media: vec![plan.name.clone()],
-            ..ScreenConfig::default()
-        })?;
+        client.set_screen_config(&saved.screen)?;
+        if let Err(error) = crate::state::save(&saved) {
+            eprintln!("warning: could not save the display state: {error}");
+        }
     }
     Ok((size, sha256))
 }

@@ -4,9 +4,11 @@
 //! like the vendor app's `std::map`-backed JSON, so payloads match it byte
 //! for byte apart from number formatting.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DisplaySettings {
     /// `Top`, `Center`, or `Bottom`.
     pub position: String,
@@ -32,7 +34,8 @@ impl Default for DisplaySettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ScreenConfig {
     /// Factory preset such as `Pre-set 1: Cooling delivery`; empty selects
     /// the custom `media` list instead.

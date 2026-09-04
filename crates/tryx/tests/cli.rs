@@ -192,3 +192,50 @@ fn media_upload_dry_run_never_touches_a_device() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn metrics_set_validates_before_touching_a_device() {
+    let too_many = tryx()
+        .args([
+            "metrics",
+            "set",
+            "--labels",
+            "cpu-temp,gpu-temp,cpu-usage,gpu-usage",
+            "--tty",
+            "/nonexistent/ttyTRYX",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(too_many.status.code(), Some(2));
+    let bad_color = tryx()
+        .args([
+            "metrics",
+            "set",
+            "--labels",
+            "cpu-temp",
+            "--color",
+            "red",
+            "--media",
+            "a.mp4",
+            "--tty",
+            "/nonexistent/ttyTRYX",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(bad_color.status.code(), Some(2));
+}
+
+#[test]
+fn metrics_status_is_linux_only() {
+    let output = tryx()
+        .args(["metrics", "status", "--json"])
+        .output()
+        .unwrap();
+    if cfg!(target_os = "linux") {
+        assert!(output.status.success());
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(value["cpu"].is_object());
+    } else {
+        assert_eq!(output.status.code(), Some(4));
+    }
+}

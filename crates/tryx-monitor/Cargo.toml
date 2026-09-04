@@ -1,0 +1,14 @@
+[package]
+name = "tryx-monitor"
+description = "Host metrics for TRYX display overlays: CPU, GPU, memory, and disk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+which = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.30", features = ["fs"] }

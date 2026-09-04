@@ -118,6 +118,15 @@ impl Client {
             .request("temperature", &commands::temperature_unit(unit).to_string())
     }
 
+    /// `POST sysinfoDisplay`: the overlay's metric labels. Fire-and-forget
+    /// like upstream.
+    pub fn set_sysinfo_display(&mut self, labels: &[String]) -> Result<(), LegacyError> {
+        self.link.send(
+            "sysinfoDisplay",
+            &commands::sysinfo_display(labels).to_string(),
+        )
+    }
+
     pub fn send_spec(&mut self, cpu: &str, gpu: &str) -> Result<Response, LegacyError> {
         self.link
             .request("spec", &commands::spec(cpu, gpu).to_string())

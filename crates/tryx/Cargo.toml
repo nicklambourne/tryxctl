@@ -15,6 +15,7 @@ serde_json = { workspace = true }
 tryx-device = { path = "../tryx-device" }
 tryx-legacy = { path = "../tryx-legacy" }
 tryx-media = { path = "../tryx-media" }
+tryx-monitor = { path = "../tryx-monitor" }
 which = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
