@@ -39,3 +39,12 @@ jobs:
       # Smoke test: Ubuntu's ffmpeg carries libx264 and no device is attached,
       # so doctor must pass with warnings only.
       - run: cargo run --quiet -- doctor
+
+  nix:
+    # The flake package must keep building; GitHub-hosted like everything else.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - run: nix build .#tryx --print-build-logs
+      - run: ./result/bin/tryx doctor || test $? -eq 4

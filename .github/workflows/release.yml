@@ -31,7 +31,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            musl-tools linux-libc-dev protobuf-compiler pkg-config file
+            musl-tools linux-libc-dev protobuf-compiler pkg-config file ffmpeg
           # libusb's Linux backend includes kernel UAPI headers, which
           # Ubuntu's musl-gcc does not see; expose them to it.
           sudo ln -sfn /usr/include/linux /usr/include/${{ matrix.arch }}-linux-musl/linux
@@ -95,6 +95,8 @@ jobs:
           name="tryx-${{ steps.tarball.outputs.version }}-${{ matrix.target }}"
           "dist/$name/tryx" doctor || test $? -eq 4
           "dist/$name/tryx" devices --json
+          # ffmpeg is installed above, so a non-media file is rejected (5),
+          # not reported as a missing tool (4).
           "dist/$name/tryx" media check --target kanali-turris README.md || test $? -eq 5
 
       - uses: actions/upload-artifact@v4

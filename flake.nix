@@ -5,18 +5,22 @@
 
   outputs = { self, nixpkgs }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
-      forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      # The tool drives Linux USB and serial devices; the dev shell also
+      # works on macOS for the media and protocol code.
+      linux = [ "x86_64-linux" "aarch64-linux" ];
+      systems = linux ++ [ "x86_64-darwin" "aarch64-darwin" ];
+      forEach = list: f: nixpkgs.lib.genAttrs list (system: f nixpkgs.legacyPackages.${system});
+      forAll = forEach systems;
       version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
     in
     {
-      packages = forAll (pkgs:
+      packages = forEach linux (pkgs:
         let
           inherit (pkgs) lib stdenv;
           # Tools tryx runs at runtime: ffmpeg with libx264 for media, adb for
           # legacy-firmware transfers. Wrapped onto PATH so the package works
           # on a bare system.
-          runtime = [ pkgs.ffmpeg ] ++ lib.optionals stdenv.isLinux [ pkgs.android-tools ];
+          runtime = [ pkgs.ffmpeg ] ++ lib.optionals stdenv.hostPlatform.isLinux [ pkgs.android-tools ];
           native = stdenv.buildPlatform.canExecute stdenv.hostPlatform;
         in
         rec {
@@ -33,7 +37,8 @@
 
             # The man page and completions come from the binary itself.
             postInstall = lib.optionalString native ''
-              installManPage <($out/bin/tryx manpage)
+              $out/bin/tryx manpage > tryx.1
+              installManPage tryx.1
               installShellCompletion --cmd tryx \
                 --bash <($out/bin/tryx completions bash) \
                 --zsh <($out/bin/tryx completions zsh) \
