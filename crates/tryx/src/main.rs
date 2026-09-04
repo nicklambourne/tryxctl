@@ -9,6 +9,7 @@ mod metrics;
 mod output;
 mod show;
 mod state;
+mod tui;
 
 use clap::{Parser, Subcommand};
 use exit::{CommandResult, Failure};
@@ -58,6 +59,8 @@ enum Command {
         #[command(subcommand)]
         action: MetricsAction,
     },
+    /// Open the interactive interface.
+    Tui,
     /// Play media already stored on the display.
     Show {
         /// File names as listed by `tryx media ls`.
@@ -232,6 +235,7 @@ fn main() -> ExitCode {
             MediaAction::Rm { names } => media::rm(cli.json, &session, &names),
         },
         Command::Show { media, play } => show::run(cli.json, &session, &media, &play),
+        Command::Tui => tui::run(&session),
         Command::Metrics { action } => match action {
             MetricsAction::Status => metrics::status(cli.json),
             MetricsAction::Set { args } => metrics::set(cli.json, &session, &args),

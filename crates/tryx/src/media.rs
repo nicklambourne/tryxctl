@@ -399,7 +399,7 @@ pub fn convert(
     Ok(exit::ok())
 }
 
-fn connect_adb(target: &DeviceTarget) -> Result<(Adb, String), Failure> {
+pub fn connect_adb(target: &DeviceTarget) -> Result<(Adb, String), Failure> {
     let adb = Adb::new()?;
     let devices = adb.devices()?;
     let selected = adb::select(&devices, target.usb_serial(), target.sysfs_name()).ok_or_else(|| {
