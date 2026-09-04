@@ -6,6 +6,7 @@
 
 pub mod check;
 pub mod encode;
+pub mod mxhd;
 pub mod plan;
 pub mod preview;
 pub mod probe;
@@ -15,7 +16,7 @@ pub mod transform;
 pub use check::{Finding, Kind, Report, Severity};
 pub use plan::Plan;
 pub use probe::Probe;
-pub use target::Target;
+pub use target::{Format, Target};
 pub use transform::{Mode, Transform};
 
 use std::path::PathBuf;

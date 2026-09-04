@@ -4,7 +4,7 @@ use crate::MediaError;
 use crate::check::Kind;
 use crate::plan::{Action, Plan};
 use crate::probe::Probe;
-use crate::target::Target;
+use crate::target::{Format, Target};
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -111,9 +111,22 @@ pub fn verify(
         .video()
         .ok_or_else(|| fail("the output has no video stream".to_string()))?;
     let dimensions = (video.width.unwrap_or(0), video.height.unwrap_or(0));
+    let container = match target.format {
+        Format::Mp4 => "mp4",
+        Format::RawH264 | Format::Mxhd => "h264",
+    };
+    let expect_stream = |probe: &Probe, video: &crate::probe::Stream| -> Result<(), MediaError> {
+        if video.codec_name != "h264" || !probe.format.is_container(container) {
+            return Err(fail(format!(
+                "expected an H.264 {}",
+                container.to_uppercase()
+            )));
+        }
+        Ok(())
+    };
     match (plan.kind, plan.action) {
         (_, Action::Passthrough) => {}
-        (Kind::Image, _) => {
+        (Kind::Image, _) if target.format == Format::Mp4 => {
             if video.codec_name != "png" {
                 return Err(fail(format!("expected a PNG, found {}", video.codec_name)));
             }
@@ -124,24 +137,21 @@ pub fn verify(
                 )));
             }
         }
-        (_, Action::Remux) => {
-            if video.codec_name != "h264" || !probe.format.is_container("mp4") {
-                return Err(fail("expected an H.264 MP4".to_string()));
-            }
-        }
-        (_, Action::Encode) => {
-            if video.codec_name != "h264" || !probe.format.is_container("mp4") {
-                return Err(fail("expected an H.264 MP4".to_string()));
-            }
+        (_, Action::Remux) => expect_stream(&probe, video)?,
+        (kind, Action::Encode) => {
+            expect_stream(&probe, video)?;
             if dimensions != (target.width, target.height) {
                 return Err(fail(format!(
                     "expected {}×{}, found {}×{}",
                     target.width, target.height, dimensions.0, dimensions.1
                 )));
             }
-            if video
-                .frame_rate()
-                .is_none_or(|fps| (fps - f64::from(target.fps)).abs() > 0.05)
+            // A single Turris frame carries no usable timing.
+            let single_frame = kind == Kind::Image && target.format == Format::Mxhd;
+            if !single_frame
+                && video
+                    .frame_rate()
+                    .is_none_or(|fps| (fps - f64::from(target.fps)).abs() > 0.05)
             {
                 return Err(fail(format!(
                     "expected {} fps, found {:?}",

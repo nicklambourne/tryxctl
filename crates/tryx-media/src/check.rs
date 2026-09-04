@@ -1,7 +1,7 @@
 //! Findings about a source file measured against a target.
 
 use crate::probe::{Probe, Stream};
-use crate::target::Target;
+use crate::target::{Format, Target};
 use crate::transform::{Mode, Transform};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -214,6 +214,20 @@ pub fn check(path: &Path, size: u64, probe: &Probe, target: Target, options: &Op
         ),
     }
 
+    if target.format != Format::Mp4 {
+        requirements.re_encode = true;
+        requirements.remux = false;
+        findings.push(auto(
+            "TRYX-M-FORMAT",
+            format!("{} plays raw H.264 streams", target.label),
+            match kind {
+                Kind::Image if target.format == Format::RawH264 => "encode as a 60 s H.264 loop",
+                Kind::Image => "encode as a single H.264 frame",
+                _ => "encode as a raw H.264 stream",
+            },
+        ));
+    }
+
     let passthrough = !requirements.re_encode && !requirements.remux;
     let name = derive_name(
         path,
@@ -332,24 +346,26 @@ fn check_video(
         ));
     }
 
-    if source.container.split(',').any(|name| name == "mp4") {
-        findings.push(ok("TRYX-M-CONTAINER", "MP4 container"));
-    } else {
-        requirements.remux = true;
-        findings.push(auto(
-            "TRYX-M-CONTAINER",
-            format!("container is {}", source.container),
-            "rewrap as MP4",
-        ));
-    }
+    if target.format == Format::Mp4 {
+        if source.container.split(',').any(|name| name == "mp4") {
+            findings.push(ok("TRYX-M-CONTAINER", "MP4 container"));
+        } else {
+            requirements.remux = true;
+            findings.push(auto(
+                "TRYX-M-CONTAINER",
+                format!("container is {}", source.container),
+                "rewrap as MP4",
+            ));
+        }
 
-    if source.has_audio {
-        requirements.remux = true;
-        findings.push(auto(
-            "TRYX-M-AUDIO",
-            "the file has an audio track",
-            "drop it; the display has no speaker",
-        ));
+        if source.has_audio {
+            requirements.remux = true;
+            findings.push(auto(
+                "TRYX-M-AUDIO",
+                "the file has an audio track",
+                "drop it; the display has no speaker",
+            ));
+        }
     }
 }
 
