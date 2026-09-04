@@ -10,6 +10,7 @@ mod show;
 
 use clap::{Parser, Subcommand};
 use exit::{CommandResult, Failure};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 /// Control TRYX cooler displays from the terminal.
@@ -75,6 +76,62 @@ enum DisplayAction {
 enum MediaAction {
     /// List the media files stored on the display and its free space.
     Ls,
+    /// Validate files against the display without touching it.
+    Check {
+        #[arg(required = true, value_name = "FILE")]
+        files: Vec<PathBuf>,
+        /// Treat anything that would be changed automatically as an error.
+        #[arg(long)]
+        strict: bool,
+        /// File name to use on the display.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        #[command(flatten)]
+        transform: media::TransformArgs,
+    },
+    /// Convert a file to what the display expects, without uploading it.
+    Convert {
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// Where to write the result; defaults to the display file name.
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Show the plan and the ffmpeg command without running it.
+        #[arg(long)]
+        dry_run: bool,
+        /// File name to use on the display.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        #[command(flatten)]
+        transform: media::TransformArgs,
+    },
+    /// Validate, convert if needed, and copy a file to the display.
+    Upload {
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// File name to use on the display.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// Start playing it once uploaded.
+        #[arg(long)]
+        show: bool,
+        /// Overwrite a file of the same name.
+        #[arg(long)]
+        replace: bool,
+        /// Show the plan without converting or uploading.
+        #[arg(long)]
+        dry_run: bool,
+        /// Refuse files that would be changed automatically.
+        #[arg(long)]
+        strict: bool,
+        #[command(flatten)]
+        transform: media::TransformArgs,
+    },
+    /// Delete media files from the display.
+    Rm {
+        #[arg(required = true, value_name = "NAME")]
+        names: Vec<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -90,9 +147,34 @@ fn main() -> ExitCode {
         Command::Display {
             action: DisplayAction::Set { brightness },
         } => display::set(cli.json, &session, brightness),
-        Command::Media {
-            action: MediaAction::Ls,
-        } => media::ls(cli.json, &session),
+        Command::Media { action } => match action {
+            MediaAction::Ls => media::ls(cli.json, &session),
+            MediaAction::Check {
+                files,
+                strict,
+                name,
+                transform,
+            } => media::check(cli.json, &files, strict, &transform, name),
+            MediaAction::Convert {
+                file,
+                output,
+                dry_run,
+                name,
+                transform,
+            } => media::convert(cli.json, &file, output, dry_run, &transform, name),
+            MediaAction::Upload {
+                file,
+                name,
+                show,
+                replace,
+                dry_run,
+                strict,
+                transform,
+            } => media::upload(
+                cli.json, &session, &file, name, show, replace, dry_run, strict, &transform,
+            ),
+            MediaAction::Rm { names } => media::rm(cli.json, &session, &names),
+        },
         Command::Show { media, play } => show::run(cli.json, &session, &media, &play),
     };
     match result {

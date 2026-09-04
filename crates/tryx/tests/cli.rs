@@ -78,3 +78,117 @@ fn show_rejects_unsafe_media_names_before_touching_a_device() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("not safe"));
 }
+
+/// Writes a small test image with ffmpeg, or returns None when ffmpeg is
+/// not installed (the check commands then fail with exit code 4 instead).
+fn sample_png(name: &str) -> Option<std::path::PathBuf> {
+    let ffmpeg = which::which("ffmpeg").ok()?;
+    let dir = std::env::temp_dir().join(format!("tryx-cli-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(name);
+    let status = std::process::Command::new(ffmpeg)
+        .args([
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=64x32:rate=1:duration=1",
+            "-frames:v",
+            "1",
+        ])
+        .arg(&path)
+        .status()
+        .ok()?;
+    status.success().then_some(path)
+}
+
+#[test]
+fn media_check_reports_findings_and_strictness() {
+    let Some(png) = sample_png("tiny.png") else {
+        let output = tryx()
+            .args(["media", "check", "/nonexistent.png"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(4));
+        return;
+    };
+    let output = tryx().args(["media", "check"]).arg(&png).output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("TRYX-M-RESOLUTION"), "{stdout}");
+    assert!(
+        stdout.contains("plan: convert to a 1920×960 PNG"),
+        "{stdout}"
+    );
+
+    let strict = tryx()
+        .args(["media", "check", "--strict"])
+        .arg(&png)
+        .output()
+        .unwrap();
+    assert_eq!(strict.status.code(), Some(5));
+
+    let json = tryx()
+        .args(["media", "check", "--json"])
+        .arg(&png)
+        .output()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(value[0]["report"]["kind"], "image");
+    assert_eq!(value[0]["plan"]["action"], "encode");
+
+    let missing = tryx()
+        .args(["media", "check", "/nonexistent/file.mp4"])
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(5));
+    assert!(String::from_utf8_lossy(&missing.stdout).contains("TRYX-M-UNREADABLE"));
+}
+
+#[test]
+fn media_convert_dry_run_prints_the_command() {
+    let Some(png) = sample_png("dry.png") else {
+        return;
+    };
+    let output = tryx()
+        .args(["media", "convert", "--dry-run", "--mode", "fill"])
+        .arg(&png)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("command: ffmpeg"), "{stdout}");
+    assert!(stdout.contains("-frames:v 1"), "{stdout}");
+    let bad = tryx()
+        .args(["media", "convert", "--dry-run", "--mode", "squash"])
+        .arg(&png)
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(2));
+}
+
+#[test]
+fn media_upload_dry_run_never_touches_a_device() {
+    let Some(png) = sample_png("upload.png") else {
+        return;
+    };
+    let output = tryx()
+        .args([
+            "media",
+            "upload",
+            "--dry-run",
+            "--tty",
+            "/nonexistent/ttyTRYX",
+        ])
+        .arg(&png)
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

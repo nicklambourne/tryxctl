@@ -10,6 +10,8 @@ pub const DEVICE: u8 = 3;
 pub const ENVIRONMENT: u8 = 4;
 /// Command-line usage error, matching clap's own code.
 pub const USAGE: u8 = 2;
+/// A media file was rejected or could not be prepared.
+pub const MEDIA: u8 = 5;
 
 pub fn ok() -> ExitCode {
     ExitCode::SUCCESS
@@ -45,6 +47,32 @@ impl Failure {
         Failure {
             code: ExitCode::from(USAGE),
             message: message.into(),
+        }
+    }
+
+    pub fn media(message: impl Into<String>) -> Self {
+        Failure {
+            code: ExitCode::from(MEDIA),
+            message: message.into(),
+        }
+    }
+}
+
+impl From<std::io::Error> for Failure {
+    fn from(error: std::io::Error) -> Self {
+        Failure::environment(error.to_string())
+    }
+}
+
+impl From<tryx_media::MediaError> for Failure {
+    fn from(error: tryx_media::MediaError) -> Self {
+        use tryx_media::MediaError;
+        match error {
+            MediaError::FfmpegMissing | MediaError::FfprobeMissing => Failure::environment(
+                format!("{error}; the nix shell provides ffmpeg and ffprobe"),
+            ),
+            MediaError::Io(error) => Failure::environment(error.to_string()),
+            other => Failure::media(other.to_string()),
         }
     }
 }
