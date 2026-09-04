@@ -453,23 +453,17 @@ mod tests {
     use super::*;
 
     fn fake_roots() -> (PathBuf, PathBuf, PathBuf) {
-        let base = std::env::temp_dir().join(format!(
-            "tryx-monitor-{}-{}",
-            std::process::id(),
-            rand_suffix()
-        ));
+        // A counter, not a timestamp: tests start within the same tick and
+        // must never share a tree.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let base =
+            std::env::temp_dir().join(format!("tryx-monitor-{}-{unique}", std::process::id()));
         let proc_root = base.join("proc");
         let sys_root = base.join("sys");
         std::fs::create_dir_all(&proc_root).unwrap();
         std::fs::create_dir_all(&sys_root).unwrap();
         (base, proc_root, sys_root)
-    }
-
-    fn rand_suffix() -> u128 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
     }
 
     fn write(path: &Path, text: &str) {
