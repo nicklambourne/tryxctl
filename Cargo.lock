@@ -2023,6 +2023,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tryx-device",
+ "tryx-kanali",
  "tryx-legacy",
  "tryx-media",
  "tryx-monitor",

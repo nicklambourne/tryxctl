@@ -1,7 +1,7 @@
 //! Turning a report into ffmpeg work.
 
 use crate::check::{Kind, Options, Report};
-use crate::target::Format;
+use crate::target::{Format, Target};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +18,7 @@ pub enum Action {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Plan {
+    pub target: Target,
     pub action: Action,
     pub kind: Kind,
     pub input: PathBuf,
@@ -69,6 +70,7 @@ impl Plan {
 
         let plan = match kind {
             Kind::Image if !report.requirements.re_encode => Plan {
+                target,
                 action: Action::Passthrough,
                 kind,
                 input,
@@ -97,6 +99,7 @@ impl Plan {
                     .map(|s| s.to_string()),
                 );
                 Plan {
+                    target,
                     action: Action::Encode,
                     kind,
                     input,
@@ -294,6 +297,7 @@ impl Plan {
                     }
                 };
                 Plan {
+                    target,
                     action: Action::Encode,
                     kind,
                     input,
@@ -321,6 +325,7 @@ impl Plan {
                     .map(|s| s.to_string()),
                 );
                 Plan {
+                    target,
                     action: Action::Remux,
                     kind,
                     input,
@@ -332,6 +337,7 @@ impl Plan {
                 }
             }
             Kind::Image | Kind::Video | Kind::AnimatedImage => Plan {
+                target,
                 action: Action::Passthrough,
                 kind,
                 input,

@@ -2,13 +2,15 @@
 //! little-endian length followed by JSON.
 
 use crate::exit::Failure;
+use crate::legacy::{Info, Protocol};
 use crate::state::DisplayState;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
-use tryx_legacy::{DeviceInfo, FanStatus, ScreenConfig};
+use tryx_device::Product;
+use tryx_legacy::{FanStatus, ScreenConfig};
 use tryx_monitor::Sample;
 
 const MAX_FRAME: usize = 1024 * 1024;
@@ -35,6 +37,13 @@ pub enum Request {
         command: String,
         body: String,
         wait: bool,
+    },
+    /// KANALI only: the media on the display.
+    Catalog,
+    /// KANALI only: send a prepared local file as `name`.
+    Upload {
+        path: PathBuf,
+        name: String,
     },
 }
 
@@ -68,11 +77,14 @@ impl Reply {
 /// What the daemon knows right now.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DaemonStatus {
+    pub protocol: Protocol,
+    pub product: Option<Product>,
+    /// The port or USB id the daemon owns.
     pub tty: String,
     pub started_unix: i64,
     pub interval: u64,
     pub pushes: u64,
-    pub info: Option<DeviceInfo>,
+    pub info: Option<Info>,
     pub sample: Option<Sample>,
     pub fans: FanStatus,
     pub screen: ScreenConfig,
@@ -128,12 +140,25 @@ pub fn available() -> bool {
     UnixStream::connect(socket_path()).is_ok()
 }
 
+/// The daemon's status, or `None` when no daemon answers.
+pub fn status() -> Result<Option<DaemonStatus>, Failure> {
+    match call(&Request::Status)? {
+        Some(reply) if reply.ok => Ok(serde_json::from_value(reply.value).ok()),
+        _ => Ok(None),
+    }
+}
+
 /// Sends one request. `Ok(None)` means no daemon is listening.
 pub fn call(request: &Request) -> Result<Option<Reply>, Failure> {
+    call_with_timeout(request, Duration::from_secs(60))
+}
+
+/// Like [`call`], waiting up to `timeout` for the reply.
+pub fn call_with_timeout(request: &Request, timeout: Duration) -> Result<Option<Reply>, Failure> {
     let Ok(mut stream) = UnixStream::connect(socket_path()) else {
         return Ok(None);
     };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+    let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
     let bytes = serde_json::to_vec(request)?;
     write_frame(&mut stream, &bytes).map_err(|e| Failure::device(format!("daemon socket: {e}")))?;
@@ -145,7 +170,11 @@ pub fn call(request: &Request) -> Result<Option<Reply>, Failure> {
 
 /// Sends one request and turns a daemon-side error into a device failure.
 pub fn expect(request: &Request) -> Result<Reply, Failure> {
-    match call(request)? {
+    expect_with_timeout(request, Duration::from_secs(60))
+}
+
+pub fn expect_with_timeout(request: &Request, timeout: Duration) -> Result<Reply, Failure> {
+    match call_with_timeout(request, timeout)? {
         Some(reply) if reply.ok => Ok(reply),
         Some(reply) => Err(Failure::device(
             reply.error.unwrap_or_else(|| "daemon error".into()),

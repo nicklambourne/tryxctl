@@ -1,21 +1,21 @@
-//! The thread that talks to the display. Serial commands, adb, the host
-//! monitor, and the periodic metrics push all live here so frames never
-//! interleave on the port.
+//! The thread that talks to the display. Serial or USB commands, adb, the
+//! host monitor, and the periodic metrics push all live here so frames never
+//! interleave on the link.
 
 use crate::ipc::{self, Request as IpcRequest};
-use crate::legacy::{Connection, Session, Target};
-use crate::media::connect_adb;
+use crate::legacy::{Connection, Info, Session, Target};
+use crate::media::{connect_adb, finish_stage};
 use crate::metrics::pc_info;
 use crate::state;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use tryx_legacy::FanStatus;
+use tryx_legacy::ScreenConfig;
 use tryx_legacy::adb::{Adb, DiskUsage, MediaFile};
-use tryx_legacy::{DeviceInfo, FanStatus, ScreenConfig};
 use tryx_media::check::{Options, Severity};
 use tryx_media::plan::Action;
-use tryx_media::target::LEGACY_PANORAMA;
 use tryx_media::{Plan, Probe, encode};
 use tryx_monitor::{Monitor, Sample};
 
@@ -31,7 +31,7 @@ pub enum Request {
 }
 
 pub enum Event {
-    Info(DeviceInfo),
+    Info(Info),
     Fans(FanStatus),
     Via(&'static str),
     Media {
@@ -57,7 +57,7 @@ pub struct Worker {
 impl Worker {
     pub fn spawn(
         session: Session,
-        target: Target,
+        target: Option<Target>,
         requests: Receiver<Request>,
         events: Sender<Event>,
     ) -> Worker {
@@ -75,7 +75,8 @@ impl Worker {
 
 struct WorkerState {
     session: Session,
-    target: Target,
+    /// The legacy serial target; `None` on KANALI displays.
+    target: Option<Target>,
     events: Sender<Event>,
     connection: Option<Connection>,
     adb: Option<Adb>,
@@ -85,7 +86,7 @@ struct WorkerState {
 }
 
 impl WorkerState {
-    fn new(session: Session, target: Target, events: Sender<Event>) -> Self {
+    fn new(session: Session, target: Option<Target>, events: Sender<Event>) -> Self {
         WorkerState {
             session,
             target,
@@ -119,10 +120,10 @@ impl WorkerState {
     }
 
     /// Every two seconds: a host sample for the footer, plus the push when
-    /// this worker owns the port. With the daemon, its status carries both.
+    /// this worker owns the link. With the daemon, its status carries both.
     fn tick(&mut self) {
         match &mut self.connection {
-            Some(Connection::Daemon) => match ipc::call(&IpcRequest::Status) {
+            Some(Connection::Daemon { .. }) => match ipc::call(&IpcRequest::Status) {
                 Ok(Some(reply)) if reply.ok => {
                     if let Ok(status) = serde_json::from_value::<ipc::DaemonStatus>(reply.value) {
                         if let Some(sample) = status.sample {
@@ -148,6 +149,18 @@ impl WorkerState {
                 }
                 self.emit(Event::Sample(sample));
             }
+            Some(Connection::Kanali(link)) => {
+                let sample = self.monitor.sample();
+                if self.pushing {
+                    let result = link.keepalive().and_then(|()| link.push(&sample));
+                    if let Err(error) = result {
+                        self.pushing = false;
+                        self.emit(Event::Pushing(false));
+                        self.emit(Event::Error(format!("keepalive stopped: {error}")));
+                    }
+                }
+                self.emit(Event::Sample(sample));
+            }
             None => {
                 let sample = self.monitor.sample();
                 self.emit(Event::Sample(sample));
@@ -166,7 +179,15 @@ impl WorkerState {
                         failure.message
                     ))),
                 }
-                if matches!(connection, Connection::Daemon) {
+                if let Connection::Kanali(link) = &mut connection
+                    && let Err(failure) = link.adopt_state(&state::load())
+                {
+                    self.emit(Event::Error(failure.message));
+                }
+                if matches!(
+                    connection,
+                    Connection::Daemon { .. } | Connection::Kanali(_)
+                ) {
                     self.pushing = true;
                     self.emit(Event::Pushing(true));
                 }
@@ -174,9 +195,11 @@ impl WorkerState {
             }
             Err(failure) => self.emit(Event::Error(failure.message)),
         }
-        match connect_adb(&self.target) {
-            Ok((adb, _)) => self.adb = Some(adb),
-            Err(failure) => self.emit(Event::Error(format!("adb: {}", failure.message))),
+        if let Some(target) = &self.target {
+            match connect_adb(target) {
+                Ok((adb, _)) => self.adb = Some(adb),
+                Err(failure) => self.emit(Event::Error(format!("adb: {}", failure.message))),
+            }
         }
     }
 
@@ -189,11 +212,11 @@ impl WorkerState {
             Request::Overlay(screen) => self.overlay(*screen),
             Request::Upload(path) => self.upload(&path),
             Request::PushMetrics(enabled) => match &self.connection {
-                Some(Connection::Daemon) => {
+                Some(Connection::Daemon { .. }) => {
                     self.emit(Event::Pushing(true));
                     Err("the daemon pushes metrics; stop it to push from here".to_string())
                 }
-                Some(Connection::Direct { .. }) => {
+                Some(Connection::Direct { .. } | Connection::Kanali(_)) => {
                     self.pushing = enabled;
                     self.emit(Event::Pushing(enabled));
                     Ok(())
@@ -219,10 +242,27 @@ impl WorkerState {
             .ok_or_else(|| "adb is not connected".to_string())
     }
 
+    /// The files on the display and, over adb, the free space.
+    fn list(&mut self) -> Result<(Vec<MediaFile>, Option<DiskUsage>), String> {
+        if self.target.is_some() {
+            let adb = self.adb()?;
+            let files = adb.list_media().map_err(|e| e.to_string())?;
+            return Ok((files, adb.free_space().ok()));
+        }
+        let catalog = self.connection()?.catalog().map_err(|f| f.message)?;
+        let files = catalog
+            .user
+            .into_iter()
+            .map(|entry| MediaFile {
+                name: entry.name,
+                size: u64::from(entry.size),
+            })
+            .collect();
+        Ok((files, None))
+    }
+
     fn refresh(&mut self) -> Result<(), String> {
-        let adb = self.adb()?;
-        let files = adb.list_media().map_err(|e| e.to_string())?;
-        let storage = adb.free_space().ok();
+        let (files, storage) = self.list()?;
         self.emit(Event::Media { files, storage });
         Ok(())
     }
@@ -243,7 +283,9 @@ impl WorkerState {
         self.connection()?
             .delete_media(&[name.to_string()])
             .map_err(|f| f.message)?;
-        self.adb()?.remove(name).map_err(|e| e.to_string())?;
+        if let Some(adb) = &self.adb {
+            adb.remove(name).map_err(|e| e.to_string())?;
+        }
         self.emit(Event::Log(format!("removed {name}")));
         self.refresh()
     }
@@ -279,8 +321,8 @@ impl WorkerState {
         let metadata = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let probe = Probe::read(&ffprobe, path).map_err(|e| e.to_string())?;
         let options = Options::default();
-        let report =
-            tryx_media::check::check(path, metadata.len(), &probe, LEGACY_PANORAMA, &options);
+        let target = self.connection()?.media_target();
+        let report = tryx_media::check::check(path, metadata.len(), &probe, target, &options);
         if !report.acceptable(false) {
             let reason = report
                 .findings
@@ -291,14 +333,8 @@ impl WorkerState {
             return Err(format!("{}: {reason}", path.display()));
         }
         let plan = Plan::from_report(&report, &options).ok_or("nothing to upload")?;
-        let name = plan.name.clone();
-        let adb = self.adb()?;
-        if adb
-            .list_media()
-            .map_err(|e| e.to_string())?
-            .iter()
-            .any(|f| f.name == name)
-        {
+        let name = self.connection()?.remote_name(&plan.name);
+        if self.list()?.0.iter().any(|f| f.name == name) {
             return Err(format!("{name} already exists on the display"));
         }
         let staged = if plan.action == Action::Passthrough {
@@ -323,18 +359,37 @@ impl WorkerState {
                 },
             )
             .map_err(|e| e.to_string())?;
-            encode::verify(&ffprobe, &plan, &staged, LEGACY_PANORAMA).map_err(|e| e.to_string())?;
+            finish_stage(&ffprobe, &plan, &staged).map_err(|f| f.message)?;
             staged
         };
         self.emit(Event::UploadProgress {
             name: name.clone(),
             fraction: 1.0,
         });
-        let result = adb.push(&staged, &name).map_err(|e| e.to_string());
+        let result = if self.target.is_some() {
+            self.adb()?.push(&staged, &name).map_err(|e| e.to_string())
+        } else {
+            let events = self.events.clone();
+            let progress_name = name.clone();
+            self.connection()?
+                .upload(&staged, &name, |sent, total| {
+                    if total > 0 {
+                        let _ = events.send(Event::UploadProgress {
+                            name: progress_name.clone(),
+                            fraction: sent as f64 / total as f64,
+                        });
+                    }
+                })
+                .map_err(|f| f.message)
+        };
         if staged != plan.input {
             let _ = std::fs::remove_file(&staged);
         }
         result?;
+        self.emit(Event::UploadProgress {
+            name: name.clone(),
+            fraction: 1.0,
+        });
         self.emit(Event::Log(format!(
             "uploaded {name} ({})",
             plan.description

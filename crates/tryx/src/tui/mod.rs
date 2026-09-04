@@ -5,7 +5,7 @@ mod app;
 mod worker;
 
 use crate::exit::{self, CommandResult, Failure};
-use crate::legacy;
+use crate::legacy::{self, Backend};
 use app::App;
 use crossterm::event::{self, Event, KeyEventKind};
 use std::sync::mpsc;
@@ -16,7 +16,10 @@ pub fn run(session: &legacy::Session) -> CommandResult {
     if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
         return Err(Failure::usage("the interface needs a terminal"));
     }
-    let target = session.select_direct()?;
+    let target = match session.select_backend()? {
+        Backend::Legacy(target) => Some(target),
+        Backend::Kanali { .. } => None,
+    };
     let (request_tx, request_rx) = mpsc::channel::<Request>();
     let (event_tx, event_rx) = mpsc::channel();
     let worker = Worker::spawn(session.clone(), target, request_rx, event_tx);

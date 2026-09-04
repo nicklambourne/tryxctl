@@ -9,29 +9,19 @@ pub fn run(json: bool, session: &legacy::Session) -> CommandResult {
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
-                "transport": "legacy-serial",
+                "transport": connection.protocol().label(),
                 "via": connection.via(),
-                "tty": connection.tty(),
+                "link": connection.tty(),
                 "device": info,
             }))?
         );
         return Ok(exit::ok());
     }
-    print!(
-        "{}",
-        output::key_values(&[
-            ("Product", info.product_id),
-            ("Firmware", info.firmware),
-            ("App", info.app_version),
-            ("Hardware", info.hardware),
-            ("OS", info.os),
-            ("Serial", info.serial),
-            ("Attributes", info.attributes.join(", ")),
-            (
-                "Via",
-                format!("{} ({})", connection.via(), connection.tty())
-            ),
-        ])
-    );
+    let mut rows = info.fields();
+    rows.push((
+        "Via",
+        format!("{} ({})", connection.via(), connection.tty()),
+    ));
+    print!("{}", output::key_values(&rows));
     Ok(exit::ok())
 }

@@ -61,13 +61,17 @@ pub fn set(json: bool, session: &legacy::Session, args: &SetArgs) -> CommandResu
         };
         screen_changed = true;
     }
+    let mut connection = session.connect()?;
+    if screen_changed && connection.protocol() == legacy::Protocol::Kanali {
+        return Err(Failure::device(
+            "filters and sleep control belong to the legacy firmware; the KANALI firmware has neither",
+        ));
+    }
     if screen_changed && saved.screen.media.is_empty() {
         return Err(Failure::usage(
             "filters and sleep are part of the screen configuration and need media: run `tryx show` first",
         ));
     }
-
-    let mut connection = session.connect()?;
     let mut statuses = serde_json::Map::new();
     if let Some(brightness) = args.brightness {
         let status = connection.brightness(brightness)?;

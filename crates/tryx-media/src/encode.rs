@@ -146,9 +146,10 @@ pub fn verify(
                     target.width, target.height, dimensions.0, dimensions.1
                 )));
             }
-            // A single Turris frame carries no usable timing.
-            let single_frame = kind == Kind::Image && target.format == Format::Mxhd;
-            if !single_frame
+            // Elementary streams expose x264's field-rate tick (60/1 for
+            // 30 fps), not the frame rate, so only containers are checked.
+            let _ = kind;
+            if target.format == Format::Mp4
                 && video
                     .frame_rate()
                     .is_none_or(|fps| (fps - f64::from(target.fps)).abs() > 0.05)

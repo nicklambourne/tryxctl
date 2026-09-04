@@ -1,23 +1,112 @@
-//! Selecting a legacy-firmware display and talking to it, either through
-//! the daemon's socket when one is running or directly over the serial port.
+//! Selecting a display and talking to it: through the daemon's socket when
+//! one is running, directly over the serial port (legacy firmware), or over
+//! USB (KANALI firmware).
 
 use crate::exit::Failure;
 use crate::ipc::{self, DaemonStatus, Request};
+use crate::kanali;
 use crate::metrics::pc_info;
 use crate::state::DisplayState;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::time::Duration;
+use tryx_device::Product;
 use tryx_device::discovery::{Access, LegacyDevice};
+use tryx_kanali::Catalog;
 use tryx_legacy::{Client, DeviceInfo, FanStatus, LegacyError, Response};
+use tryx_media::Target as MediaTarget;
+use tryx_media::target::LEGACY_PANORAMA;
 use tryx_monitor::Monitor;
 
 /// Brightness the vendor app assumes when nothing was ever set.
 pub const DEFAULT_BRIGHTNESS: u8 = 75;
 
+/// The wire protocol a display speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Protocol {
+    /// JSON over the CDC ACM serial port plus ADB for files (cm01 firmware).
+    #[default]
+    Legacy,
+    /// Protobuf frames over the printer-class USB interface.
+    Kanali,
+}
+
+impl Protocol {
+    pub fn label(self) -> &'static str {
+        match self {
+            Protocol::Legacy => "legacy-serial",
+            Protocol::Kanali => "kanali-usb",
+        }
+    }
+}
+
+/// What a display says about itself, per protocol.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "protocol", rename_all = "kebab-case")]
+pub enum Info {
+    Legacy(DeviceInfo),
+    Kanali(tryx_kanali::DeviceInfo),
+}
+
+impl Info {
+    pub fn short(&self) -> String {
+        match self {
+            Info::Legacy(info) => format!("{} firmware {}", info.product_id, info.firmware),
+            Info::Kanali(info) => {
+                format!("{} firmware {}", info.product_name, info.firmware_version)
+            }
+        }
+    }
+
+    pub fn serial(&self) -> &str {
+        match self {
+            Info::Legacy(info) => &info.serial,
+            Info::Kanali(info) => &info.serial_number,
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        format!("{} · serial {}", self.short(), self.serial())
+    }
+
+    pub fn fields(&self) -> Vec<(&'static str, String)> {
+        match self {
+            Info::Legacy(info) => vec![
+                ("Product", info.product_id.clone()),
+                ("Firmware", info.firmware.clone()),
+                ("App", info.app_version.clone()),
+                ("Hardware", info.hardware.clone()),
+                ("OS", info.os.clone()),
+                ("Serial", info.serial.clone()),
+                ("Attributes", info.attributes.join(", ")),
+            ],
+            Info::Kanali(info) => vec![
+                ("Product", info.product_name.clone()),
+                ("Firmware", info.firmware_version.clone()),
+                ("App", info.app_version.clone()),
+                ("OS", format!("{} {}", info.os_name, info.os_version)),
+                ("Chip", info.chip_id.clone()),
+                (
+                    "Serial",
+                    if info.serial_number_locked {
+                        format!("{} (locked)", info.serial_number)
+                    } else {
+                        info.serial_number.clone()
+                    },
+                ),
+            ],
+        }
+    }
+}
+
 /// Global options that pick and configure the display connection.
 #[derive(Debug, Clone)]
 pub struct Session {
     pub tty: Option<String>,
+    pub device: Option<String>,
     pub verbose: bool,
-    /// Bypass a running daemon and open the port directly.
+    /// Bypass a running daemon and open the display directly.
     pub direct: bool,
 }
 
@@ -42,19 +131,47 @@ impl Target {
     }
 }
 
+/// The display discovery settled on, before anything is opened.
+pub enum Backend {
+    Legacy(Target),
+    Kanali { id: String, product: Product },
+}
+
 /// Where commands go.
 pub enum Connection {
-    Daemon,
+    Daemon {
+        protocol: Protocol,
+        product: Option<Product>,
+    },
     Direct {
         client: Box<Client>,
         target: Box<Target>,
     },
+    Kanali(Box<kanali::Link>),
 }
 
 impl Session {
-    /// Finds the display and checks the port, without opening it.
-    pub fn select_direct(&self) -> Result<Target, Failure> {
-        select(self.tty.as_deref())
+    /// Which display and protocol discovery points at.
+    pub fn select_backend(&self) -> Result<Backend, Failure> {
+        if self.tty.is_some() {
+            return Ok(Backend::Legacy(select(self.tty.as_deref())?));
+        }
+        if self.device.is_some() {
+            let (id, product) = kanali::select(self.device.as_deref())?;
+            return Ok(Backend::Kanali { id, product });
+        }
+        let discovery =
+            tryx_device::discover().map_err(|error| Failure::device(error.to_string()))?;
+        if discovery.legacy_devices.is_empty()
+            && discovery
+                .printer_devices
+                .iter()
+                .any(|device| device.product.is_some())
+        {
+            let (id, product) = kanali::select(None)?;
+            return Ok(Backend::Kanali { id, product });
+        }
+        Ok(Backend::Legacy(select(None)?))
     }
 
     pub fn open(&self, target: &Target) -> Result<Client, Failure> {
@@ -63,17 +180,29 @@ impl Session {
         Ok(client)
     }
 
-    /// The daemon when it is listening (unless `--direct`), else the port.
+    /// The daemon when it is listening (unless `--direct`), else the display.
     pub fn connect(&self) -> Result<Connection, Failure> {
-        if !self.direct && ipc::available() {
-            return Ok(Connection::Daemon);
+        if !self.direct
+            && let Some(status) = ipc::status()?
+        {
+            return Ok(Connection::Daemon {
+                protocol: status.protocol,
+                product: status.product,
+            });
         }
-        let target = self.select_direct()?;
-        let client = self.open(&target)?;
-        Ok(Connection::Direct {
-            client: Box::new(client),
-            target: Box::new(target),
-        })
+        match self.select_backend()? {
+            Backend::Legacy(target) => {
+                let client = self.open(&target)?;
+                Ok(Connection::Direct {
+                    client: Box::new(client),
+                    target: Box::new(target),
+                })
+            }
+            Backend::Kanali { id, .. } => Ok(Connection::Kanali(Box::new(kanali::open(
+                Some(&id),
+                self.verbose,
+            )?))),
+        }
     }
 }
 
@@ -81,25 +210,52 @@ fn status_of(reply: &ipc::Reply) -> String {
     reply.value["status"].as_str().unwrap_or("200").to_string()
 }
 
+fn unsupported(what: &str) -> Failure {
+    Failure::device(format!("{what} is not available on the KANALI firmware"))
+}
+
+fn kanali_only(what: &str) -> Failure {
+    Failure::device(format!(
+        "{what} needs the KANALI firmware; this display speaks the legacy protocol"
+    ))
+}
+
 impl Connection {
+    pub fn protocol(&self) -> Protocol {
+        match self {
+            Connection::Daemon { protocol, .. } => *protocol,
+            Connection::Direct { .. } => Protocol::Legacy,
+            Connection::Kanali(_) => Protocol::Kanali,
+        }
+    }
+
     pub fn via(&self) -> &'static str {
         match self {
-            Connection::Daemon => "daemon",
+            Connection::Daemon { .. } => "daemon",
             Connection::Direct { .. } => "serial",
+            Connection::Kanali(_) => "usb",
         }
     }
 
     pub fn tty(&self) -> String {
         match self {
-            Connection::Daemon => ipc::socket_path().display().to_string(),
+            Connection::Daemon { .. } => ipc::socket_path().display().to_string(),
             Connection::Direct { target, .. } => target.tty.clone(),
+            Connection::Kanali(link) => link.id.clone(),
         }
     }
 
-    pub fn info(&mut self) -> Result<DeviceInfo, Failure> {
+    pub fn info(&mut self) -> Result<Info, Failure> {
         match self {
-            Connection::Daemon => Ok(serde_json::from_value(ipc::expect(&Request::Info)?.value)?),
-            Connection::Direct { client, .. } => Ok(client.handshake()?),
+            Connection::Daemon { .. } => {
+                Ok(serde_json::from_value(ipc::expect(&Request::Info)?.value)?)
+            }
+            Connection::Direct { client, .. } => Ok(Info::Legacy(client.handshake()?)),
+            Connection::Kanali(link) => link
+                .info
+                .clone()
+                .map(Info::Kanali)
+                .ok_or_else(|| unsupported("device information on this product")),
         }
     }
 
@@ -107,41 +263,62 @@ impl Connection {
     /// the device's status word.
     pub fn apply(&mut self, saved: &mut DisplayState) -> Result<String, Failure> {
         match self {
-            Connection::Daemon => Ok(status_of(&ipc::expect(&Request::Apply {
+            Connection::Daemon { .. } => Ok(status_of(&ipc::expect(&Request::Apply {
                 state: Box::new(saved.clone()),
             })?)),
             Connection::Direct { client, .. } => Ok(apply_screen(client, saved)?.status),
+            Connection::Kanali(link) => link.apply_state(saved),
         }
     }
 
     pub fn brightness(&mut self, value: u8) -> Result<String, Failure> {
         match self {
-            Connection::Daemon => Ok(status_of(&ipc::expect(&Request::Brightness { value })?)),
+            Connection::Daemon { .. } => {
+                Ok(status_of(&ipc::expect(&Request::Brightness { value })?))
+            }
             Connection::Direct { client, .. } => Ok(client.set_brightness(value)?.status),
+            Connection::Kanali(link) => {
+                link.device.set_brightness(u32::from(value))?;
+                Ok("applied".to_string())
+            }
         }
     }
 
     pub fn delete_media(&mut self, names: &[String]) -> Result<(), Failure> {
         match self {
-            Connection::Daemon => ipc::expect(&Request::DeleteMedia {
+            Connection::Daemon { .. } => ipc::expect(&Request::DeleteMedia {
                 names: names.to_vec(),
             })
             .map(drop),
             Connection::Direct { client, .. } => Ok(client.delete_media(names).map(drop)?),
+            Connection::Kanali(link) => {
+                for name in names {
+                    link.device.delete(name)?;
+                }
+                Ok(())
+            }
         }
     }
 
     pub fn fan_lcd(&mut self, percent: u8) -> Result<(), Failure> {
         match self {
-            Connection::Daemon => ipc::expect(&Request::FanLcd { percent }).map(drop),
+            Connection::Daemon {
+                protocol: Protocol::Legacy,
+                ..
+            } => ipc::expect(&Request::FanLcd { percent }).map(drop),
             Connection::Direct { client, .. } => Ok(client.set_fan_lcd(percent).map(drop)?),
+            Connection::Daemon { .. } | Connection::Kanali(_) => Err(unsupported("fan control")),
         }
     }
 
     pub fn reboot(&mut self) -> Result<(), Failure> {
         match self {
-            Connection::Daemon => ipc::expect(&Request::Reboot).map(drop),
+            Connection::Daemon {
+                protocol: Protocol::Legacy,
+                ..
+            } => ipc::expect(&Request::Reboot).map(drop),
             Connection::Direct { client, .. } => Ok(client.reboot().map(drop)?),
+            Connection::Daemon { .. } | Connection::Kanali(_) => Err(unsupported("reboot")),
         }
     }
 
@@ -153,7 +330,10 @@ impl Connection {
         wait: bool,
     ) -> Result<Option<(String, String)>, Failure> {
         match self {
-            Connection::Daemon => {
+            Connection::Daemon {
+                protocol: Protocol::Legacy,
+                ..
+            } => {
                 let reply = ipc::expect(&Request::Raw {
                     command: command.to_string(),
                     body: body.to_string(),
@@ -178,6 +358,9 @@ impl Connection {
                     Ok(None)
                 }
             }
+            Connection::Daemon { .. } | Connection::Kanali(_) => {
+                Err(unsupported("raw legacy commands"))
+            }
         }
     }
 
@@ -185,7 +368,10 @@ impl Connection {
     /// fresh host sample so the overlay is not fed zeros.
     pub fn fans(&mut self) -> Result<FanStatus, Failure> {
         match self {
-            Connection::Daemon => Ok(self.daemon_status()?.fans),
+            Connection::Daemon {
+                protocol: Protocol::Legacy,
+                ..
+            } => Ok(self.daemon_status()?.fans),
             Connection::Direct { client, .. } => {
                 let mut sample = if Monitor::supported() {
                     let mut monitor = Monitor::new();
@@ -198,6 +384,7 @@ impl Connection {
                 sample.timestamp_ms += tryx_legacy::local_utc_offset_ms();
                 Ok(client.send_sysinfo(&pc_info(&sample))?)
             }
+            Connection::Daemon { .. } | Connection::Kanali(_) => Err(unsupported("fan readings")),
         }
     }
 
@@ -205,6 +392,68 @@ impl Connection {
         Ok(serde_json::from_value(
             ipc::expect(&Request::Status)?.value,
         )?)
+    }
+
+    /// The media on a KANALI display.
+    pub fn catalog(&mut self) -> Result<Catalog, Failure> {
+        match self {
+            Connection::Kanali(link) => Ok(link.device.catalog()?),
+            Connection::Daemon {
+                protocol: Protocol::Kanali,
+                ..
+            } => Ok(serde_json::from_value(
+                ipc::expect(&Request::Catalog)?.value,
+            )?),
+            _ => Err(kanali_only("the media catalog")),
+        }
+    }
+
+    /// Sends a prepared file to a KANALI display under `name`.
+    pub fn upload(
+        &mut self,
+        path: &Path,
+        name: &str,
+        progress: impl FnMut(u64, u64),
+    ) -> Result<(), Failure> {
+        match self {
+            Connection::Kanali(link) => Ok(link.device.upload(path, name, progress)?),
+            Connection::Daemon {
+                protocol: Protocol::Kanali,
+                ..
+            } => ipc::expect_with_timeout(
+                &Request::Upload {
+                    path: path.to_path_buf(),
+                    name: name.to_string(),
+                },
+                Duration::from_secs(30 * 60),
+            )
+            .map(drop),
+            _ => Err(kanali_only("USB media upload")),
+        }
+    }
+
+    /// What prepared media must look like for this display.
+    pub fn media_target(&self) -> MediaTarget {
+        match self {
+            Connection::Kanali(link) => link.target(),
+            Connection::Daemon {
+                protocol: Protocol::Kanali,
+                product: Some(product),
+            } => kanali::media_target(*product),
+            _ => LEGACY_PANORAMA,
+        }
+    }
+
+    /// The name a prepared file gets on the display.
+    pub fn remote_name(&self, local_name: &str) -> String {
+        match self {
+            Connection::Kanali(link) => link.device.remote_name(local_name),
+            Connection::Daemon {
+                protocol: Protocol::Kanali,
+                product: Some(product),
+            } => format!("{local_name}{}", product.media_name_suffix()),
+            _ => local_name.to_string(),
+        }
     }
 }
 
@@ -271,7 +520,7 @@ pub fn select(tty_override: Option<&str>) -> Result<Target, Failure> {
             Err(Failure::device("no TRYX display connected"))
         }
         0 => Err(Failure::device(
-            "the connected display runs the printer-class (KANALI) firmware, which is not supported yet",
+            "the connected display runs the KANALI firmware; this command needs the legacy serial protocol",
         )),
         1 => {
             let device = legacy.remove(0);

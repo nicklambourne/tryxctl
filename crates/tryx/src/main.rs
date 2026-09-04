@@ -5,6 +5,7 @@ mod doctor;
 mod exit;
 mod info;
 mod ipc;
+mod kanali;
 mod legacy;
 mod media;
 mod metrics;
@@ -31,11 +32,15 @@ struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     tty: Option<String>,
 
+    /// USB id of a KANALI-firmware display (see `tryx devices`), bypassing discovery.
+    #[arg(long, global = true, value_name = "ID", conflicts_with = "tty")]
+    device: Option<String>,
+
     /// Dump every frame exchanged with the display to stderr.
     #[arg(short, long, global = true)]
     verbose: bool,
 
-    /// Open the serial port directly even when the daemon is running.
+    /// Open the display directly even when the daemon is running.
     #[arg(long, global = true)]
     direct: bool,
 
@@ -258,6 +263,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let session = legacy::Session {
         tty: cli.tty.clone(),
+        device: cli.device.clone(),
         verbose: cli.verbose,
         direct: cli.direct,
     };
@@ -277,9 +283,12 @@ fn main() -> ExitCode {
         } => match action {
             None => daemon::run(&session, interval, quiet),
             Some(DaemonAction::Status) => daemon::status(cli.json),
-            Some(DaemonAction::Install { interval }) => {
-                daemon::install(cli.json, interval, session.tty.as_deref())
-            }
+            Some(DaemonAction::Install { interval }) => daemon::install(
+                cli.json,
+                interval,
+                session.tty.as_deref(),
+                session.device.as_deref(),
+            ),
             Some(DaemonAction::Uninstall) => daemon::uninstall(cli.json),
         },
         Command::Media { action } => match action {

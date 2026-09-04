@@ -1,16 +1,16 @@
 use crate::exit::{self, CommandResult, Failure};
-use crate::legacy::{self, Target as DeviceTarget};
+use crate::legacy::{self, Backend, Target as DeviceTarget};
 use crate::output;
 use owo_colors::{OwoColorize, Stream};
 use serde_json::json;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use tryx_legacy::adb::{self, Adb, is_safe_media_name};
-use tryx_media::check::{self, Finding, Options, Report, Severity, Source};
+use tryx_media::check::{self, Finding, Kind, Options, Report, Severity, Source};
 use tryx_media::plan::Action;
-use tryx_media::target::LEGACY_PANORAMA;
+use tryx_media::target::{Format, KANALI_PANORAMA, KANALI_TURRIS, LEGACY_PANORAMA, Target};
 use tryx_media::transform::{Mode, Transform};
-use tryx_media::{Plan, Probe, encode, preview};
+use tryx_media::{Plan, Probe, encode, mxhd, preview};
 
 /// Room to leave on the display's storage after an upload.
 const FREE_SPACE_MARGIN: u64 = 16 * 1024 * 1024;
@@ -35,9 +35,27 @@ pub struct TransformArgs {
     /// Refuse HDR sources instead of tone-mapping them.
     #[arg(long)]
     pub no_tonemap: bool,
+    /// Display to prepare for when none is connected: legacy-panorama,
+    /// kanali-panorama, or kanali-turris (upload detects it).
+    #[arg(long, value_name = "DISPLAY")]
+    pub target: Option<String>,
 }
 
 impl TransformArgs {
+    pub fn target(&self) -> Result<Target, Failure> {
+        match self.target.as_deref() {
+            None => Ok(LEGACY_PANORAMA),
+            Some(id) => [LEGACY_PANORAMA, KANALI_PANORAMA, KANALI_TURRIS]
+                .into_iter()
+                .find(|target| target.id == id)
+                .ok_or_else(|| {
+                    Failure::usage(format!(
+                        "unknown target {id:?}; use legacy-panorama, kanali-panorama, or kanali-turris"
+                    ))
+                }),
+        }
+    }
+
     pub fn options(&self, name: Option<String>) -> Result<Options, Failure> {
         let mut transform = Transform::default();
         if let Some(mode) = &self.mode {
@@ -97,11 +115,11 @@ struct Analysis {
     plan: Option<Plan>,
 }
 
-fn analyse(ffprobe: &Path, path: &Path, options: &Options) -> Analysis {
+fn analyse(ffprobe: &Path, path: &Path, options: &Options, target: Target) -> Analysis {
     let unreadable = |message: String| Analysis {
         report: Report {
             path: path.to_path_buf(),
-            target: LEGACY_PANORAMA,
+            target,
             kind: None,
             source: Source::default(),
             findings: vec![Finding {
@@ -124,7 +142,7 @@ fn analyse(ffprobe: &Path, path: &Path, options: &Options) -> Analysis {
         Ok(probe) => probe,
         Err(error) => return unreadable(error.to_string()),
     };
-    let report = check::check(path, metadata.len(), &probe, LEGACY_PANORAMA, options);
+    let report = check::check(path, metadata.len(), &probe, target, options);
     let plan = Plan::from_report(&report, options);
     Analysis { report, plan }
 }
@@ -246,9 +264,10 @@ pub fn check(
 ) -> CommandResult {
     let (_, ffprobe) = encode::tools()?;
     let options = transform.options(name)?;
+    let target = transform.target()?;
     let analyses: Vec<Analysis> = files
         .iter()
-        .map(|file| analyse(&ffprobe, file, &options))
+        .map(|file| analyse(&ffprobe, file, &options, target))
         .collect();
     if json {
         println!(
@@ -311,7 +330,24 @@ fn run_plan(
     if !quiet && plan.action != Action::Passthrough {
         eprintln!();
     }
-    encode::verify(ffprobe, plan, output, LEGACY_PANORAMA)?;
+    finish_stage(ffprobe, plan, output)
+}
+
+/// Verifies a finished encode and wraps Turris media in its header.
+pub fn finish_stage(ffprobe: &Path, plan: &Plan, output: &Path) -> Result<(), Failure> {
+    encode::verify(ffprobe, plan, output, plan.target)?;
+    if plan.target.format == Format::Mxhd && plan.action != Action::Passthrough {
+        let raw = output.with_extension("raw.h264");
+        std::fs::rename(output, &raw)?;
+        let kind = if plan.kind == Kind::Image {
+            mxhd::MediaKind::Image
+        } else {
+            mxhd::MediaKind::Video
+        };
+        let wrapped = mxhd::wrap(&raw, output, kind);
+        let _ = std::fs::remove_file(&raw);
+        wrapped?;
+    }
     Ok(())
 }
 
@@ -325,7 +361,7 @@ pub fn convert(
 ) -> CommandResult {
     let (ffmpeg, ffprobe) = encode::tools()?;
     let options = transform.options(name)?;
-    let analysis = analyse(&ffprobe, file, &options);
+    let analysis = analyse(&ffprobe, file, &options, transform.target()?);
     if !analysis.report.acceptable(false) {
         if json {
             println!(
@@ -425,7 +461,10 @@ pub fn connect_adb(target: &DeviceTarget) -> Result<(Adb, String), Failure> {
 }
 
 pub fn ls(json: bool, session: &legacy::Session) -> CommandResult {
-    let target = session.select_direct()?;
+    let target = match session.select_backend()? {
+        Backend::Legacy(target) => target,
+        Backend::Kanali { .. } => return ls_kanali(json, session),
+    };
     let (adb, serial) = connect_adb(&target)?;
     let files = adb.list_media()?;
     let storage = adb.free_space()?;
@@ -463,6 +502,50 @@ pub fn ls(json: bool, session: &legacy::Session) -> CommandResult {
     Ok(exit::ok())
 }
 
+fn ls_kanali(json: bool, session: &legacy::Session) -> CommandResult {
+    let mut connection = session.connect()?;
+    let catalog = connection.catalog()?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "via": connection.via(),
+                "files": catalog.user,
+                "presets": catalog.presets,
+            }))?
+        );
+        return Ok(exit::ok());
+    }
+    if catalog.user.is_empty() {
+        println!("No user media on the display.");
+    } else {
+        let rows: Vec<Vec<String>> = catalog
+            .user
+            .iter()
+            .map(|file| vec![file.name.clone(), output::human_bytes(u64::from(file.size))])
+            .collect();
+        print!("{}", output::table(&["NAME", "SIZE"], &rows));
+    }
+    let used: u64 = catalog.user.iter().map(|file| u64::from(file.size)).sum();
+    println!(
+        "{} user file(s), {}; {} factory preset(s): {}",
+        catalog.user.len(),
+        output::human_bytes(used),
+        catalog.presets.len(),
+        if catalog.presets.is_empty() {
+            "none".to_string()
+        } else {
+            catalog
+                .presets
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
+    Ok(exit::ok())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn upload(
     json: bool,
@@ -477,7 +560,13 @@ pub fn upload(
 ) -> CommandResult {
     let (ffmpeg, ffprobe) = encode::tools()?;
     let options = transform.options(name)?;
-    let analysis = analyse(&ffprobe, file, &options);
+    // The connected display decides the target; --target is for offline use.
+    let backend = session.select_backend()?;
+    let target = match &backend {
+        Backend::Legacy(_) => LEGACY_PANORAMA,
+        Backend::Kanali { product, .. } => crate::kanali::media_target(*product),
+    };
+    let analysis = analyse(&ffprobe, file, &options, target);
     if !analysis.report.acceptable(strict) {
         if json {
             println!(
@@ -511,8 +600,13 @@ pub fn upload(
         return Ok(exit::ok());
     }
 
+    let target = match backend {
+        Backend::Legacy(target) => target,
+        Backend::Kanali { .. } => {
+            return upload_kanali(json, session, &analysis, &ffmpeg, &ffprobe, show, replace);
+        }
+    };
     // Fail on device problems before spending time on ffmpeg.
-    let target = session.select_direct()?;
     let (adb, _) = connect_adb(&target)?;
     let existing = adb.list_media()?;
     if existing.iter().any(|entry| entry.name == plan.name) && !replace {
@@ -571,6 +665,105 @@ pub fn upload(
     Ok(exit::ok())
 }
 
+fn upload_kanali(
+    json: bool,
+    session: &legacy::Session,
+    analysis: &Analysis,
+    ffmpeg: &Path,
+    ffprobe: &Path,
+    show: bool,
+    replace: bool,
+) -> CommandResult {
+    let plan = analysis
+        .plan
+        .as_ref()
+        .expect("an acceptable report has a plan");
+    let mut connection = session.connect()?;
+    let remote = connection.remote_name(&plan.name);
+    // Transfer-only products have no catalog to consult.
+    let catalog = connection.catalog().unwrap_or_default();
+    if catalog.presets.iter().any(|entry| entry.name == remote) {
+        return Err(Failure::media(format!(
+            "{remote} is a factory preset; pass --name to choose another name"
+        )));
+    }
+    if catalog.user.iter().any(|entry| entry.name == remote) && !replace {
+        return Err(Failure::media(format!(
+            "{remote} already exists on the display; pass --replace to overwrite it or --name to rename"
+        )));
+    }
+    if !json {
+        print_report(analysis);
+    }
+    let staged: PathBuf = if plan.action == Action::Passthrough {
+        plan.input.clone()
+    } else {
+        let staged =
+            std::env::temp_dir().join(format!("tryx-upload-{}-{}", std::process::id(), remote));
+        run_plan(
+            ffmpeg,
+            ffprobe,
+            plan,
+            &staged,
+            analysis.report.source.duration,
+            json,
+        )?;
+        staged
+    };
+    let result = (|| -> Result<(u64, String), Failure> {
+        let size = std::fs::metadata(&staged)?.len();
+        let sha256 = encode::sha256_file(&staged)?;
+        connection.upload(&staged, &remote, |sent, total| {
+            if !json && total > 0 {
+                eprint!(
+                    "\r  uploading {:>3}%  {}   ",
+                    sent * 100 / total,
+                    output::human_bytes(sent)
+                );
+            }
+        })?;
+        if !json {
+            eprintln!();
+        }
+        Ok((size, sha256))
+    })();
+    if staged != plan.input {
+        let _ = std::fs::remove_file(&staged);
+    }
+    let (size, sha256) = result?;
+    if show {
+        let mut saved = crate::state::load();
+        saved.screen.media = vec![remote.clone()];
+        connection.apply(&mut saved)?;
+        if let Err(error) = crate::state::save(&saved) {
+            eprintln!("warning: could not save the display state: {error}");
+        }
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "name": remote,
+                "size": size,
+                "sha256": sha256,
+                "action": plan.action,
+                "target": plan.target,
+                "shown": show,
+            }))?
+        );
+    } else {
+        println!(
+            "  uploaded {remote} ({}, sha256 {}…)",
+            output::human_bytes(size),
+            &sha256[..12]
+        );
+        if show {
+            println!("  showing {remote}");
+        }
+    }
+    Ok(exit::ok())
+}
+
 fn push_and_show(
     session: &legacy::Session,
     _target: &DeviceTarget,
@@ -607,7 +800,10 @@ pub fn rm(json: bool, session: &legacy::Session, names: &[String]) -> CommandRes
     if let Some(name) = names.iter().find(|name| !is_safe_media_name(name)) {
         return Err(Failure::usage(format!("media name {name:?} is not safe")));
     }
-    let target = session.select_direct()?;
+    let target = match session.select_backend()? {
+        Backend::Legacy(target) => target,
+        Backend::Kanali { .. } => return rm_kanali(json, session, names),
+    };
     let (adb, _) = connect_adb(&target)?;
     let existing = adb.list_media()?;
     if let Some(name) = names
@@ -636,6 +832,36 @@ pub fn rm(json: bool, session: &legacy::Session, names: &[String]) -> CommandRes
     Ok(exit::ok())
 }
 
+fn rm_kanali(json: bool, session: &legacy::Session, names: &[String]) -> CommandResult {
+    let mut connection = session.connect()?;
+    let catalog = connection.catalog()?;
+    for name in names {
+        if catalog.presets.iter().any(|entry| &entry.name == name) {
+            return Err(Failure::media(format!(
+                "{name} is a factory preset and cannot be removed"
+            )));
+        }
+        if !catalog.user.iter().any(|entry| &entry.name == name) {
+            return Err(Failure::media(format!("{name} is not on the display")));
+        }
+    }
+    let mut removed = Vec::new();
+    for name in names {
+        connection.delete_media(std::slice::from_ref(name))?;
+        removed.push(name.clone());
+        if !json {
+            println!("removed {name}");
+        }
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({"removed": removed}))?
+        );
+    }
+    Ok(exit::ok())
+}
+
 pub fn preview(
     json: bool,
     file: &Path,
@@ -644,9 +870,10 @@ pub fn preview(
     output: Option<PathBuf>,
     transform: &TransformArgs,
 ) -> CommandResult {
+    let target = transform.target()?;
     let (ffmpeg, ffprobe) = encode::tools()?;
     let options = transform.options(None)?;
-    let analysis = analyse(&ffprobe, file, &options);
+    let analysis = analyse(&ffprobe, file, &options, target);
     let Some(kind) = analysis.report.kind else {
         print_report(&analysis);
         return Err(Failure::media("the file has no picture to preview"));
@@ -677,24 +904,9 @@ pub fn preview(
     if sheet {
         let total = duration
             .ok_or_else(|| Failure::media("cannot make a sheet: the duration is unknown"))?;
-        preview::render_sheet(
-            &ffmpeg,
-            file,
-            &options.transform,
-            LEGACY_PANORAMA,
-            total,
-            &path,
-        )?;
+        preview::render_sheet(&ffmpeg, file, &options.transform, target, total, &path)?;
     } else {
-        preview::render_frame(
-            &ffmpeg,
-            file,
-            kind,
-            &options.transform,
-            LEGACY_PANORAMA,
-            at,
-            &path,
-        )?;
+        preview::render_frame(&ffmpeg, file, kind, &options.transform, target, at, &path)?;
     }
 
     if json {
@@ -706,7 +918,7 @@ pub fn preview(
                 "at": at,
                 "sheet": sheet,
                 "transform": options.transform,
-                "target": LEGACY_PANORAMA,
+                "target": target,
             }))?
         );
         return Ok(exit::ok());
@@ -730,8 +942,8 @@ pub fn preview(
             output::dim(&format!(
                 "{} · {}×{} · {}{}",
                 analysis.report.name,
-                LEGACY_PANORAMA.width,
-                LEGACY_PANORAMA.height,
+                target.width,
+                target.height,
                 options.transform.mode,
                 at.map(|s| format!(" · at {s:.1} s")).unwrap_or_default()
             ))

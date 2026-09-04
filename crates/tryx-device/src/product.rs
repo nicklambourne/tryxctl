@@ -3,7 +3,7 @@
 //! (`printerProductProfileForId`), so unsupported operations are rejected
 //! before any USB traffic starts.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// USB vendor ID shared by every KANALI printer-class TRYX display.
 pub const VENDOR_ID: u16 = 0x391a;
@@ -11,7 +11,7 @@ pub const VENDOR_ID: u16 = 0x391a;
 /// display boots or updates. It is discovered but never opened.
 pub const ROCKCHIP_GADGET_PRODUCT_ID: u16 = 0x0006;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Product {
     /// Panorama SE, `391a:1021`. Full feature set.

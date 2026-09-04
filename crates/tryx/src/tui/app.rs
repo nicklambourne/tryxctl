@@ -1,6 +1,7 @@
 //! Screen state, key handling, and drawing.
 
 use super::worker::{Event, Request};
+use crate::legacy::Info;
 use crate::metrics::LABELS;
 use crate::{output, state};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -12,7 +13,7 @@ use ratatui::widgets::{Block, Gauge, List, ListItem, ListState, Paragraph, Tabs,
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use tryx_legacy::adb::{DiskUsage, MediaFile};
-use tryx_legacy::{DeviceInfo, FanStatus, ScreenConfig};
+use tryx_legacy::{FanStatus, ScreenConfig};
 use tryx_monitor::Sample;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +47,7 @@ const ALIGNMENTS: [&str; 3] = ["Left", "Center", "Right"];
 pub struct App {
     requests: Sender<Request>,
     tab: Tab,
-    info: Option<DeviceInfo>,
+    info: Option<Info>,
     files: Vec<MediaFile>,
     storage: Option<DiskUsage>,
     list: ListState,
@@ -96,10 +97,7 @@ impl App {
     pub fn handle_event(&mut self, event: Event) {
         match event {
             Event::Info(info) => {
-                self.status = format!(
-                    "connected to {} firmware {}",
-                    info.product_id, info.firmware
-                );
+                self.status = format!("connected to {}", info.short());
                 self.info = Some(info);
             }
             Event::Media { files, storage } => {
@@ -319,10 +317,7 @@ impl App {
 
     fn render_header(&self, frame: &mut Frame, area: Rect) {
         let device = match &self.info {
-            Some(info) => format!(
-                "{} · firmware {} · serial {}",
-                info.product_id, info.firmware, info.serial
-            ),
+            Some(info) => info.summary(),
             None => "not connected".to_string(),
         };
         let storage = match &self.storage {
@@ -443,14 +438,11 @@ impl App {
             gauge_area,
         );
         let info = match &self.info {
-            Some(info) => vec![
-                Line::from(format!("Product     {}", info.product_id)),
-                Line::from(format!("Firmware    {}", info.firmware)),
-                Line::from(format!("App         {}", info.app_version)),
-                Line::from(format!("Hardware    {}", info.hardware)),
-                Line::from(format!("Serial      {}", info.serial)),
-                Line::from(format!("Attributes  {}", info.attributes.join(", "))),
-            ],
+            Some(info) => info
+                .fields()
+                .into_iter()
+                .map(|(key, value)| Line::from(format!("{key:<11} {value}")))
+                .collect(),
             None => vec![Line::from("No device information yet.")],
         };
         frame.render_widget(
@@ -551,7 +543,7 @@ mod tests {
     fn app_with_files() -> (App, mpsc::Receiver<Request>) {
         let (tx, rx) = mpsc::channel();
         let mut app = App::new(tx);
-        app.handle_event(Event::Info(DeviceInfo {
+        app.handle_event(Event::Info(Info::Legacy(tryx_legacy::DeviceInfo {
             product_id: "cm01".into(),
             os: "Android".into(),
             serial: "XYZ1".into(),
@@ -559,7 +551,7 @@ mod tests {
             firmware: "V1.0.3".into(),
             hardware: "V1.1".into(),
             attributes: vec![],
-        }));
+        })));
         app.handle_event(Event::Media {
             files: vec![
                 MediaFile {
@@ -585,7 +577,7 @@ mod tests {
         let (mut app, _rx) = app_with_files();
         let text = rendered(&mut app, 100, 24);
         assert!(
-            text.contains("cm01 · firmware V1.0.3 · serial XYZ1"),
+            text.contains("cm01 firmware V1.0.3 · serial XYZ1"),
             "{text}"
         );
         assert!(text.contains("vendor.mp4"), "{text}");

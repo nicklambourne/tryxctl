@@ -102,3 +102,9 @@ impl From<tryx_legacy::LegacyError> for Failure {
 }
 
 pub type CommandResult = Result<ExitCode, Failure>;
+
+impl From<tryx_kanali::KanaliError> for Failure {
+    fn from(error: tryx_kanali::KanaliError) -> Self {
+        Failure::device(error.to_string())
+    }
+}

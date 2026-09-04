@@ -7,15 +7,17 @@ use tryx_legacy::commands::{CpuInfo, DiskInfo, GpuInfo, MemoryInfo, PcInfo};
 use tryx_monitor::{Monitor, Sample};
 
 /// Overlay labels the legacy firmware understands, with CLI aliases.
-pub const LABELS: [(&str, &[&str]); 13] = [
+pub const LABELS: [(&str, &[&str]); 15] = [
     ("CPU Temperature", &["cpu-temp", "cpu-temperature"]),
     ("CPU Frequency", &["cpu-freq", "cpu-frequency"]),
     ("CPU Usage", &["cpu-usage", "cpu-load"]),
     ("CPU Voltage", &["cpu-voltage"]),
+    ("CPU Power", &["cpu-power"]),
     ("GPU Temperature", &["gpu-temp", "gpu-temperature"]),
     ("GPU Frequency", &["gpu-freq", "gpu-frequency"]),
     ("GPU Usage", &["gpu-usage", "gpu-load"]),
     ("GPU Voltage", &["gpu-voltage"]),
+    ("GPU Power", &["gpu-power"]),
     ("Hard Disk Temperature", &["disk-temp", "disk-temperature"]),
     (
         "Motherboard Temperature",
@@ -30,6 +32,8 @@ pub const LABELS: [(&str, &[&str]); 13] = [
 ];
 /// The overlay shows at most this many labels.
 pub const MAX_LABELS: usize = 3;
+/// Labels only the KANALI firmware renders.
+pub const KANALI_ONLY_LABELS: [&str; 2] = ["CPU Power", "GPU Power"];
 
 pub fn resolve_label(text: &str) -> Option<&'static str> {
     let wanted = text.trim();
@@ -251,12 +255,6 @@ pub fn set(json: bool, session: &legacy::Session, args: &SetArgs) -> CommandResu
     if let Some(play) = &args.play {
         screen.play_mode = title_case_choice(play, &["Single", "Loop", "Shuffle"], "--play")?;
     }
-    if screen.media.is_empty() {
-        return Err(Failure::usage(
-            "the overlay is part of the screen configuration and needs media: pass --media NAME or run `tryx show` first",
-        ));
-    }
-
     if let Some(cpu) = &args.cpu_name {
         saved.cpu_name = Some(cpu.clone());
     }
@@ -272,6 +270,23 @@ pub fn set(json: bool, session: &legacy::Session, args: &SetArgs) -> CommandResu
     legacy::hardware_names(&mut saved);
 
     let mut connection = session.connect()?;
+    if connection.protocol() == legacy::Protocol::Legacy {
+        if saved.screen.media.is_empty() {
+            return Err(Failure::usage(
+                "the overlay is part of the screen configuration and needs media: pass --media NAME or run `tryx show` first",
+            ));
+        }
+        if let Some(label) = saved
+            .screen
+            .sysinfo_display
+            .iter()
+            .find(|label| KANALI_ONLY_LABELS.contains(&label.as_str()))
+        {
+            return Err(Failure::usage(format!(
+                "{label} is only shown by the KANALI firmware"
+            )));
+        }
+    }
     let status = connection.apply(&mut saved)?;
     let names = (
         saved.cpu_name.clone().unwrap_or_default(),
@@ -391,7 +406,12 @@ pub fn push(
             "the tryx daemon is running and already pushes metrics; see `tryx daemon status`",
         ));
     }
-    let target = session.select_direct()?;
+    let target = match session.select_backend()? {
+        legacy::Backend::Legacy(target) => target,
+        legacy::Backend::Kanali { id, .. } => {
+            return push_kanali(json, &id, session.verbose, interval, once, quiet, apply);
+        }
+    };
     let mut client = session.open(&target)?;
     if apply {
         // The display blanks when the host goes quiet, so restore the saved
@@ -427,6 +447,50 @@ pub fn push(
             break;
         }
         thread::sleep(Duration::from_secs(interval));
+        sample = monitor.sample();
+    }
+    Ok(exit::ok())
+}
+
+/// The KANALI loop: the 2 s ping and overlay lease, with values in between.
+fn push_kanali(
+    json: bool,
+    id: &str,
+    verbose: bool,
+    interval: u64,
+    once: bool,
+    quiet: bool,
+    apply: bool,
+) -> CommandResult {
+    let mut link = crate::kanali::open(Some(id), verbose)?;
+    let saved = state::load();
+    if apply {
+        link.apply_state(&saved)?;
+        if !quiet && !json {
+            let overlay = if saved.screen.sysinfo_display.is_empty() {
+                "no overlay".to_string()
+            } else {
+                saved.screen.sysinfo_display.join(", ")
+            };
+            println!("applied the saved screen with {overlay}");
+        }
+    } else {
+        link.adopt_state(&saved)?;
+    }
+    let mut monitor = Monitor::new();
+    let mut sample = warm_sample(&mut monitor);
+    loop {
+        link.keepalive()?;
+        link.push(&sample)?;
+        if json {
+            println!("{}", serde_json::to_string(&json!({"sample": sample}))?);
+        } else if !quiet {
+            println!("{}", summary_line(&sample));
+        }
+        if once {
+            break;
+        }
+        thread::sleep(Duration::from_secs(interval.clamp(1, 2)));
         sample = monitor.sample();
     }
     Ok(exit::ok())
