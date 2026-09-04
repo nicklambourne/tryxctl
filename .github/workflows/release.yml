@@ -59,7 +59,7 @@ jobs:
           mkdir -p target/packaging
           "$bin" manpage > target/packaging/tryxctl.1
           "$bin" completions bash > target/packaging/tryxctl.bash
-          "$bin" completions zsh > target/packaging/_tryx
+          "$bin" completions zsh > target/packaging/_tryxctl
           "$bin" completions fish > target/packaging/tryxctl.fish
 
       - name: Package the tarball
