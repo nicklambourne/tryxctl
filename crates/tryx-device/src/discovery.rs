@@ -6,6 +6,7 @@
 //! recognised on Linux from sysfs by their `cm01*` product string.
 
 use crate::product::{Product, ROCKCHIP_GADGET_PRODUCT_ID, VENDOR_ID};
+use rusb::UsbContext;
 use serde::Serialize;
 use std::fmt;
 
@@ -117,6 +118,10 @@ pub struct LegacyDevice {
 pub struct Discovery {
     pub printer_devices: Vec<PrinterDevice>,
     pub legacy_devices: Vec<LegacyDevice>,
+    /// Why printer-class enumeration was impossible, e.g. no USB subsystem
+    /// in a container. Legacy devices are still found through sysfs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usb_error: Option<String>,
 }
 
 impl Discovery {
@@ -132,9 +137,14 @@ pub enum DiscoveryError {
 }
 
 pub fn discover() -> Result<Discovery, DiscoveryError> {
+    let (printer_devices, usb_error) = match printer_devices() {
+        Ok(devices) => (devices, None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
     Ok(Discovery {
-        printer_devices: printer_devices()?,
+        printer_devices,
         legacy_devices: legacy_devices(),
+        usb_error,
     })
 }
 
@@ -185,8 +195,11 @@ struct Strings {
 }
 
 fn printer_devices() -> Result<Vec<PrinterDevice>, rusb::Error> {
+    // An explicit context: the global one aborts the process when libusb
+    // cannot initialise, which happens wherever /dev/bus/usb is absent.
+    let context = rusb::Context::new()?;
     let mut found = Vec::new();
-    for device in rusb::devices()?.iter() {
+    for device in context.devices()?.iter() {
         let Ok(descriptor) = device.device_descriptor() else {
             continue;
         };
@@ -200,7 +213,7 @@ fn printer_devices() -> Result<Vec<PrinterDevice>, rusb::Error> {
 }
 
 fn describe_printer_device(
-    device: &rusb::Device<rusb::GlobalContext>,
+    device: &rusb::Device<rusb::Context>,
     descriptor: &rusb::DeviceDescriptor,
 ) -> PrinterDevice {
     let ports = device.port_numbers().unwrap_or_default();
@@ -261,7 +274,7 @@ fn with_sysfs_fallback(strings: Strings, _sysfs_path: Option<&str>) -> Strings {
 }
 
 fn read_strings(
-    handle: &rusb::DeviceHandle<rusb::GlobalContext>,
+    handle: &rusb::DeviceHandle<rusb::Context>,
     descriptor: &rusb::DeviceDescriptor,
 ) -> Strings {
     Strings {

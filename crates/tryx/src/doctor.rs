@@ -294,6 +294,14 @@ fn check_devices(checks: &mut Vec<Check>) {
             return;
         }
     };
+    if let Some(error) = &discovery.usb_error {
+        checks.push(check(
+            "usb enumeration",
+            Status::Warn,
+            format!("libusb unavailable, so printer-class displays cannot be found: {error}"),
+            Some("Legacy cm01 displays are still found through sysfs."),
+        ));
+    }
     if discovery.is_empty() {
         checks.push(check(
             "devices",

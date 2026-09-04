@@ -14,6 +14,9 @@ pub fn run(json: bool) -> anyhow::Result<ExitCode> {
 }
 
 fn print_human(discovery: &Discovery) {
+    if let Some(error) = &discovery.usb_error {
+        eprintln!("warning: printer-class displays cannot be listed: {error}");
+    }
     if discovery.is_empty() {
         println!("No TRYX displays found.");
         return;
