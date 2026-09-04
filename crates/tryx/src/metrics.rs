@@ -384,10 +384,28 @@ pub fn push(
     interval: u64,
     once: bool,
     quiet: bool,
+    apply: bool,
 ) -> CommandResult {
     require_linux()?;
     let target = session.select()?;
     let mut client = session.open(&target)?;
+    if apply {
+        // The display falls back to its built-in content when the host goes
+        // quiet, so restore the saved screen before the first sample.
+        let mut saved = state::load();
+        if !saved.screen.media.is_empty() {
+            legacy::apply_screen(&mut client, &mut saved)?;
+            let _ = state::save(&saved);
+            if !quiet && !json {
+                let overlay = if saved.screen.sysinfo_display.is_empty() {
+                    "no overlay".to_string()
+                } else {
+                    saved.screen.sysinfo_display.join(", ")
+                };
+                println!("restored {} with {overlay}", saved.screen.media.join(", "));
+            }
+        }
+    }
     let mut monitor = Monitor::new();
     let mut sample = warm_sample(&mut monitor);
     loop {
@@ -402,6 +420,113 @@ pub fn push(
         }
         thread::sleep(Duration::from_secs(interval));
         sample = monitor.sample();
+    }
+    Ok(exit::ok())
+}
+
+pub const SERVICE_NAME: &str = "tryx-metrics.service";
+
+fn user_unit_path() -> Result<std::path::PathBuf, Failure> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
+        })
+        .ok_or_else(|| Failure::environment("HOME is not set"))?;
+    Ok(base.join("systemd/user").join(SERVICE_NAME))
+}
+
+fn systemctl(args: &[&str]) -> Result<String, Failure> {
+    let output = std::process::Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .output()
+        .map_err(|error| Failure::environment(format!("systemctl: {error}")))?;
+    if !output.status.success() {
+        return Err(Failure::environment(format!(
+            "systemctl --user {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Writes and starts a systemd user service that keeps the overlay live.
+pub fn install(json: bool, interval: u64, tty: Option<&str>) -> CommandResult {
+    require_linux()?;
+    let binary = std::env::current_exe()
+        .map_err(|error| Failure::environment(format!("cannot locate this binary: {error}")))?;
+    if binary.components().any(|c| c.as_os_str() == "target") {
+        eprintln!(
+            "warning: the service will run {}, a development build; install a release binary and rerun",
+            binary.display()
+        );
+    }
+    let unit = user_unit_path()?;
+    if let Some(parent) = unit.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tty_arg = tty.map(|t| format!(" --tty {t}")).unwrap_or_default();
+    let text = format!(
+        "[Unit]\nDescription=TRYX display metrics overlay\nDocumentation=https://github.com/nicklambourne/tryx-cli\n\n[Service]\nExecStart={} metrics push --interval {interval} --quiet{tty_arg}\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
+        binary.display()
+    );
+    std::fs::write(&unit, text)?;
+    systemctl(&["daemon-reload"])?;
+    systemctl(&["enable", "--now", SERVICE_NAME])?;
+    let linger = std::process::Command::new("loginctl")
+        .arg("enable-linger")
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "unit": unit,
+                "binary": binary,
+                "interval": interval,
+                "linger": linger,
+            }))?
+        );
+    } else {
+        println!(
+            "installed and started {} ({})",
+            SERVICE_NAME,
+            unit.display()
+        );
+        println!(
+            "{}",
+            if linger {
+                "lingering enabled: the service also runs while you are logged out"
+            } else {
+                "could not enable lingering; run `loginctl enable-linger` so it survives logout"
+            }
+        );
+        println!("check it with: systemctl --user status {SERVICE_NAME}");
+    }
+    Ok(exit::ok())
+}
+
+pub fn uninstall(json: bool) -> CommandResult {
+    require_linux()?;
+    let unit = user_unit_path()?;
+    let _ = systemctl(&["disable", "--now", SERVICE_NAME]);
+    let removed = std::fs::remove_file(&unit).is_ok();
+    let _ = systemctl(&["daemon-reload"]);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({"unit": unit, "removed": removed}))?
+        );
+    } else {
+        println!(
+            "{} {}",
+            if removed { "removed" } else { "no unit at" },
+            unit.display()
+        );
     }
     Ok(exit::ok())
 }

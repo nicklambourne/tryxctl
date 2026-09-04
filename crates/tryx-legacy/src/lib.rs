@@ -82,6 +82,11 @@ impl Client {
         self.link.trace = trace;
     }
 
+    /// The underlying link, for sending commands the client does not model.
+    pub fn link_mut(&mut self) -> &mut SerialLink {
+        &mut self.link
+    }
+
     /// `POST conn`: identifies the device.
     pub fn handshake(&mut self) -> Result<DeviceInfo, LegacyError> {
         let response = self.link.request("conn", "")?;

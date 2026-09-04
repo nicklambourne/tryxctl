@@ -258,42 +258,52 @@ pub struct NetworkInfo {
     pub upload: f64,
 }
 
+/// The firmware parses sysinfo values as whole numbers: `54.0` is read as
+/// nothing at all, so every value is rounded and sent as an integer.
+fn whole(value: f64) -> i64 {
+    if value.is_finite() {
+        value.round() as i64
+    } else {
+        0
+    }
+}
+
 pub fn pc_info(info: &PcInfo) -> Value {
     json!({
         "cpu": {
-            "load": info.cpu.load,
-            "temperature": info.cpu.temperature,
-            "speedAverage": info.cpu.speed_average,
-            "voltage": info.cpu.voltage,
-            "power": info.cpu.power,
-            "fanAverage": info.cpu.fan_average,
+            "load": whole(info.cpu.load),
+            "temperature": whole(info.cpu.temperature),
+            "speedAverage": whole(info.cpu.speed_average),
+            "voltage": whole(info.cpu.voltage),
+            "power": whole(info.cpu.power),
+            "fanAverage": whole(info.cpu.fan_average),
         },
         "gpu": {
-            "load": info.gpu.load,
+            "load": whole(info.gpu.load),
             "temperature": info.gpu.temperature,
-            "speed": info.gpu.speed,
-            "voltage": info.gpu.voltage,
-            "power": info.gpu.power,
-            "fan": info.gpu.fan,
+            "speed": whole(info.gpu.speed),
+            "voltage": whole(info.gpu.voltage),
+            "power": whole(info.gpu.power),
+            "fan": whole(info.gpu.fan),
         },
         "memory": {
-            "load": info.memory.load,
-            "speed": info.memory.speed,
-            "temperature": info.memory.temperature,
-            "total": info.memory.total,
-            "used": info.memory.used,
+            "load": whole(info.memory.load),
+            "speed": whole(info.memory.speed),
+            "temperature": whole(info.memory.temperature),
+            "total": whole(info.memory.total),
+            "used": whole(info.memory.used),
         },
-        "motherboard": {"temperature": info.motherboard_temperature},
+        "motherboard": {"temperature": whole(info.motherboard_temperature)},
         "disk": {
-            "load": info.disk.load,
-            "used": info.disk.used,
-            "total": info.disk.total,
-            "temperature": info.disk.temperature,
-            "activity": info.disk.activity,
-            "readSpeed": info.disk.read_speed,
-            "writeSpeed": info.disk.write_speed,
+            "load": whole(info.disk.load),
+            "used": whole(info.disk.used),
+            "total": whole(info.disk.total),
+            "temperature": whole(info.disk.temperature),
+            "activity": whole(info.disk.activity),
+            "readSpeed": whole(info.disk.read_speed),
+            "writeSpeed": whole(info.disk.write_speed),
         },
-        "network": {"download": info.network.download, "upload": info.network.upload},
+        "network": {"download": whole(info.network.download), "upload": whole(info.network.upload)},
         "fans": [],
         "timestamp": info.timestamp_ms,
     })
@@ -399,8 +409,30 @@ mod tests {
         };
         let body = pc_info(&info);
         assert_eq!(body["gpu"]["temperature"], "61");
-        assert_eq!(body["cpu"]["temperature"], 0.0);
+        assert_eq!(body["cpu"]["temperature"], 0);
         assert_eq!(body["fans"], json!([]));
         assert_eq!(body["timestamp"], 1_700_000_000_000_i64);
+    }
+
+    #[test]
+    fn pc_info_sends_whole_numbers_only() {
+        // The firmware shows zero for anything with a decimal point.
+        let info = PcInfo {
+            cpu: CpuInfo {
+                temperature: 54.4,
+                load: 12.6,
+                speed_average: 4199.9,
+                power: 65.5,
+                ..CpuInfo::default()
+            },
+            ..PcInfo::default()
+        };
+        let text = pc_info(&info).to_string();
+        assert!(!text.contains('.'), "{text}");
+        let body = pc_info(&info);
+        assert_eq!(body["cpu"]["temperature"], 54);
+        assert_eq!(body["cpu"]["load"], 13);
+        assert_eq!(body["cpu"]["speedAverage"], 4200);
+        assert_eq!(body["cpu"]["power"], 66);
     }
 }

@@ -7,6 +7,7 @@ mod legacy;
 mod media;
 mod metrics;
 mod output;
+mod raw;
 mod show;
 mod state;
 mod tui;
@@ -69,6 +70,21 @@ enum Command {
     /// Print the manual page in roff.
     #[command(hide = true)]
     Manpage,
+    /// Send one raw legacy command with a JSON body (protocol exploration).
+    #[command(hide = true)]
+    Raw {
+        /// Command name, e.g. brightness.
+        command: String,
+        /// JSON body; empty when omitted.
+        #[arg(default_value = "")]
+        body: String,
+        /// Do not wait for a reply.
+        #[arg(long)]
+        no_wait: bool,
+        /// Repeat every N seconds until interrupted.
+        #[arg(long, value_name = "SECONDS")]
+        every: Option<u64>,
+    },
     /// Play media already stored on the display.
     Show {
         /// File names as listed by `tryx media ls`.
@@ -113,7 +129,18 @@ enum MetricsAction {
         /// Do not print each sample.
         #[arg(short, long)]
         quiet: bool,
+        /// Do not restore the saved screen before pushing.
+        #[arg(long)]
+        no_apply: bool,
     },
+    /// Install and start a systemd user service that runs `metrics push`.
+    Install {
+        /// Seconds between samples.
+        #[arg(long, value_name = "SECONDS", default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=60))]
+        interval: u64,
+    },
+    /// Stop and remove the metrics service.
+    Uninstall,
 }
 
 #[derive(Subcommand)]
@@ -248,6 +275,12 @@ fn main() -> ExitCode {
             clap_complete::generate(shell, &mut Cli::command(), "tryx", &mut std::io::stdout());
             Ok(exit::ok())
         }
+        Command::Raw {
+            command,
+            body,
+            no_wait,
+            every,
+        } => raw::run(&session, &command, &body, no_wait, every),
         Command::Manpage => {
             let mut out = Vec::new();
             match clap_mangen::Man::new(Cli::command()).render(&mut out) {
@@ -266,7 +299,12 @@ fn main() -> ExitCode {
                 interval,
                 once,
                 quiet,
-            } => metrics::push(cli.json, &session, interval, once, quiet),
+                no_apply,
+            } => metrics::push(cli.json, &session, interval, once, quiet, !no_apply),
+            MetricsAction::Install { interval } => {
+                metrics::install(cli.json, interval, session.tty.as_deref())
+            }
+            MetricsAction::Uninstall => metrics::uninstall(cli.json),
         },
     };
     match result {
