@@ -115,10 +115,14 @@ enum Command {
         /// Repeat every N seconds until interrupted.
         #[arg(long, value_name = "SECONDS")]
         every: Option<u64>,
+        /// Request method; the firmware is only known to answer POST.
+        #[arg(long, default_value = "POST", value_name = "METHOD")]
+        method: String,
     },
     /// Play media already stored on the display.
     Show {
-        /// File names as listed by `tryxctl media ls`.
+        /// File names as listed by `tryxctl media ls`, or preset:1 to preset:6
+        /// for a built-in animation.
         #[arg(required = true, value_name = "NAME")]
         media: Vec<String>,
         /// Playback mode.
@@ -129,7 +133,9 @@ enum Command {
 
 #[derive(Subcommand)]
 enum DisplayAction {
-    /// Change brightness, the filter effect, or the sleep behaviour.
+    /// Show what the display is set to.
+    Get,
+    /// Change brightness, layout, rotation, the filter effect, or the sleep behaviour.
     Set {
         #[command(flatten)]
         args: display::SetArgs,
@@ -272,6 +278,7 @@ fn main() -> ExitCode {
         Command::Devices => devices::run(cli.json).map_err(Failure::from),
         Command::Info => info::run(cli.json, &session),
         Command::Display { action } => match action {
+            DisplayAction::Get => display::get(cli.json, &session),
             DisplayAction::Set { args } => display::set(cli.json, &session, &args),
             DisplayAction::Reboot => display::reboot(cli.json, &session),
         },
@@ -342,7 +349,8 @@ fn main() -> ExitCode {
             body,
             no_wait,
             every,
-        } => raw::run(&session, &command, &body, no_wait, every),
+            method,
+        } => raw::run(&session, &method, &command, &body, no_wait, every),
         Command::Manpage => {
             let mut out = Vec::new();
             match clap_mangen::Man::new(Cli::command()).render(&mut out) {

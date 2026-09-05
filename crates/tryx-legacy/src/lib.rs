@@ -59,12 +59,26 @@ pub struct DeviceInfo {
 }
 
 /// Fan readings the firmware returns in reply to a sysinfo message.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FanStatus {
     /// `status.fanLCD`: the fan on the display block.
     pub lcd_fan_rpm: Option<u32>,
     /// `status.turboPump`: reported by some models only.
     pub pump_rpm: Option<u32>,
+    /// `availableStorage`: free bytes on the media partition, which the
+    /// firmware only reports to `STATE all`.
+    #[serde(default)]
+    pub available_storage: Option<u64>,
+    /// `warning`: per-component health, e.g. `Fan LCD: No ERROR`.
+    #[serde(default)]
+    pub warnings: Vec<FanWarning>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FanWarning {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub description: String,
 }
 
 impl FanStatus {
@@ -87,6 +101,17 @@ impl FanStatus {
         FanStatus {
             lcd_fan_rpm: field("fanLCD"),
             pump_rpm: field("turboPump"),
+            available_storage: json
+                .get("availableStorage")
+                .and_then(|value| value.as_u64().or_else(|| value.as_str()?.parse().ok())),
+            // The firmware wraps the array in a JSON string.
+            warnings: json
+                .get("warning")
+                .and_then(|value| match value {
+                    serde_json::Value::String(text) => serde_json::from_str(text).ok(),
+                    other => serde_json::from_value(other.clone()).ok(),
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -201,12 +226,14 @@ impl Client {
         self.link.request("config", &body.to_string())
     }
 
-    /// `POST all`: live system metrics, which also keeps the panel awake.
-    /// The reply carries the fan readings; a missing reply is not an error.
+    /// `STATE all`: live system metrics, which also keeps the panel awake.
+    /// The reply carries the fan readings, their health, and the free
+    /// storage; `POST` gets only the readings. A missing reply is not an
+    /// error.
     pub fn send_sysinfo(&mut self, info: &PcInfo) -> Result<FanStatus, LegacyError> {
         match self
             .link
-            .request("all", &commands::pc_info(info).to_string())
+            .request_with("STATE", "all", &commands::pc_info(info).to_string())
         {
             Ok(response) => Ok(response
                 .json
@@ -226,6 +253,14 @@ impl Client {
 }
 
 impl DeviceInfo {
+    /// Whether the firmware reports a pump tachometer (`status.turboPump`),
+    /// advertised as the `Turbo Pump` attribute on the models that have one.
+    pub fn has_pump(&self) -> bool {
+        self.attributes
+            .iter()
+            .any(|attribute| attribute == "Turbo Pump")
+    }
+
     fn from_json(json: &serde_json::Value) -> DeviceInfo {
         let text = |value: &serde_json::Value, key: &str| {
             value
@@ -290,20 +325,27 @@ mod tests {
 
     #[test]
     fn fan_status_reads_numbers_or_digit_strings() {
-        let status =
-            FanStatus::from_json(&json!({"status": {"fanLCD": "1280", "turboPump": 2400}}));
+        let status = FanStatus::from_json(
+            &json!({"status": {"fanLCD": "1280", "turboPump": 2400}, "availableStorage": 3111497728u64, "warning": "[{\"description\":\"No ERROR\",\"type\":\"Fan LCD\"}]"}),
+        );
         assert_eq!(
             status,
             FanStatus {
                 lcd_fan_rpm: Some(1280),
-                pump_rpm: Some(2400)
+                pump_rpm: Some(2400),
+                available_storage: Some(3_111_497_728),
+                warnings: vec![FanWarning {
+                    kind: "Fan LCD".into(),
+                    description: "No ERROR".into(),
+                }],
             }
         );
         assert_eq!(
             FanStatus::from_json(&json!({"status": {"fanLCD": "0"}})),
             FanStatus {
                 lcd_fan_rpm: Some(0),
-                pump_rpm: None
+                pump_rpm: None,
+                ..FanStatus::default()
             }
         );
         assert_eq!(FanStatus::from_json(&json!({})), FanStatus::default());

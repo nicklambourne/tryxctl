@@ -5,6 +5,7 @@ use crate::legacy;
 
 pub fn run(
     session: &legacy::Session,
+    method: &str,
     command: &str,
     body: &str,
     no_wait: bool,
@@ -16,7 +17,7 @@ pub fn run(
     }
     let mut connection = session.connect()?;
     loop {
-        match connection.raw(command, body, !no_wait)? {
+        match connection.raw(method, command, body, !no_wait)? {
             Some((status, reply)) => println!("{command}: {status} {reply}"),
             None => println!("sent {command}"),
         }

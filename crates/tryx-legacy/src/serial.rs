@@ -61,7 +61,18 @@ impl SerialLink {
 
     /// Sends `POST <command>` and waits for the reply.
     pub fn request(&mut self, command: &str, content: &str) -> Result<Response, LegacyError> {
-        self.send(command, content)?;
+        self.request_with("POST", command, content)
+    }
+
+    /// Sends `<method> <command>` and waits for the reply; for protocol
+    /// exploration, where the method is not known to be POST.
+    pub fn request_with(
+        &mut self,
+        method: &str,
+        command: &str,
+        content: &str,
+    ) -> Result<Response, LegacyError> {
+        self.send_with(method, command, content)?;
         self.read_response(command)
     }
 
@@ -91,9 +102,18 @@ impl SerialLink {
 
     /// Sends `POST <command>` without waiting for a reply.
     pub fn send(&mut self, command: &str, content: &str) -> Result<(), LegacyError> {
+        self.send_with("POST", command, content)
+    }
+
+    pub fn send_with(
+        &mut self,
+        method: &str,
+        command: &str,
+        content: &str,
+    ) -> Result<(), LegacyError> {
         self.drain();
         self.sequence += 1;
-        let bytes = frame::build_frame("POST", command, content, "1", self.sequence)?;
+        let bytes = frame::build_frame(method, command, content, "1", self.sequence)?;
         if self.trace {
             eprintln!(
                 "-> {command} #{} {} bytes\n   {}",

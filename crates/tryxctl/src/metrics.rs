@@ -211,6 +211,9 @@ pub struct SetArgs {
     /// Show temperatures in Fahrenheit.
     #[arg(long)]
     pub fahrenheit: bool,
+    /// Which half the labels and layout apply to in split mode: left or right.
+    #[arg(long, value_name = "left|right", default_value = "left")]
+    pub area: String,
 }
 
 pub fn set(json: bool, session: &legacy::Session, args: &SetArgs) -> CommandResult {
@@ -220,27 +223,37 @@ pub fn set(json: bool, session: &legacy::Session, args: &SetArgs) -> CommandResu
         (None, true) => Some(Vec::new()),
         (None, false) => None,
     };
+    let right = match args.area.to_ascii_lowercase().as_str() {
+        "left" => false,
+        "right" => true,
+        _ => return Err(Failure::usage("--area must be left or right")),
+    };
     let mut saved = state::load();
     let screen = &mut saved.screen;
+    let (display, settings) = if right {
+        (&mut screen.sysinfo_display2, &mut screen.settings2)
+    } else {
+        (&mut screen.sysinfo_display, &mut screen.settings)
+    };
     if let Some(labels) = &labels {
-        screen.sysinfo_display = labels.clone();
+        *display = labels.clone();
     }
     if let Some(position) = &args.position {
-        screen.settings.position =
+        settings.position =
             title_case_choice(position, &["Top", "Center", "Bottom"], "--position")?;
     }
     if let Some(align) = &args.align {
-        screen.settings.align = title_case_choice(align, &["Left", "Center", "Right"], "--align")?;
+        settings.align = title_case_choice(align, &["Left", "Center", "Right"], "--align")?;
     }
     if let Some(color) = &args.color {
         let hex = color.strip_prefix('#').unwrap_or(color);
         if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(Failure::usage(format!("--color {color:?} is not #RRGGBB")));
         }
-        screen.settings.color = format!("#{}", hex.to_ascii_uppercase());
+        settings.color = format!("#{}", hex.to_ascii_uppercase());
     }
     if let Some(badges) = &args.badges {
-        screen.settings.badges = parse_badges(badges)?;
+        settings.badges = parse_badges(badges)?;
     }
     if !args.media.is_empty() {
         if let Some(name) = args
@@ -271,7 +284,7 @@ pub fn set(json: bool, session: &legacy::Session, args: &SetArgs) -> CommandResu
 
     let mut connection = session.connect()?;
     if connection.protocol() == legacy::Protocol::Legacy {
-        if saved.screen.media.is_empty() {
+        if saved.screen.media.is_empty() && saved.screen.preset_id.is_empty() {
             return Err(Failure::usage(
                 "the overlay is part of the screen configuration and needs media: pass --media NAME or run `tryxctl show` first",
             ));
@@ -280,6 +293,7 @@ pub fn set(json: bool, session: &legacy::Session, args: &SetArgs) -> CommandResu
             .screen
             .sysinfo_display
             .iter()
+            .chain(saved.screen.sysinfo_display2.iter())
             .find(|label| KANALI_ONLY_LABELS.contains(&label.as_str()))
         {
             return Err(Failure::usage(format!(
@@ -308,16 +322,21 @@ pub fn set(json: bool, session: &legacy::Session, args: &SetArgs) -> CommandResu
             }))?
         );
     } else {
-        let labels = &saved.screen.sysinfo_display;
+        let (labels, settings) = if right {
+            (&saved.screen.sysinfo_display2, &saved.screen.settings2)
+        } else {
+            (&saved.screen.sysinfo_display, &saved.screen.settings)
+        };
+        let area = if right { "right half: " } else { "" };
         if labels.is_empty() {
-            println!("Overlay cleared ({status})");
+            println!("{area}overlay cleared ({status})");
         } else {
             println!(
-                "Overlay shows {} at {} {} in {} ({})",
+                "{area}overlay shows {} at {} {} in {} ({})",
                 labels.join(", "),
-                saved.screen.settings.position.to_lowercase(),
-                saved.screen.settings.align.to_lowercase(),
-                saved.screen.settings.color,
+                settings.position.to_lowercase(),
+                settings.align.to_lowercase(),
+                settings.color,
                 status
             );
         }
@@ -530,21 +549,42 @@ pub fn fans(
             println!("LCD fan set to a fixed {percent}%");
         }
     }
+    let has_pump = connection.info().ok().map(|info| info.has_pump());
     loop {
         let fans = connection.fans()?;
         if json {
             println!(
                 "{}",
-                serde_json::to_string(&json!({"via": connection.via(), "fans": fans}))?
+                serde_json::to_string(
+                    &json!({"via": connection.via(), "fans": fans, "has_pump": has_pump})
+                )?
             );
         } else {
-            let text = fans_suffix(&fans);
+            let mut parts = Vec::new();
+            if let Some(rpm) = fans.lcd_fan_rpm {
+                parts.push(format!("lcd fan {rpm} rpm"));
+            }
+            match (fans.pump_rpm, has_pump) {
+                (Some(rpm), _) => parts.push(format!("pump {rpm} rpm")),
+                (None, Some(false)) => parts.push("pump not reported by this model".to_string()),
+                (None, _) => {}
+            }
+            for warning in &fans.warnings {
+                parts.push(format!(
+                    "{}: {}",
+                    warning.kind.to_lowercase(),
+                    warning.description.to_lowercase()
+                ));
+            }
+            if let Some(bytes) = fans.available_storage {
+                parts.push(format!("{} free", output::human_bytes(bytes)));
+            }
             println!(
                 "{}",
-                if text.is_empty() {
+                if parts.is_empty() {
                     "no fan readings reported".to_string()
                 } else {
-                    text.trim_start_matches(" · ").to_string()
+                    parts.join(" · ")
                 }
             );
         }

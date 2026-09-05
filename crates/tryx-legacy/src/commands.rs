@@ -80,6 +80,35 @@ impl Default for ScreenConfig {
 }
 
 pub const SCREEN_SPLITTING: &str = "Screen Splitting";
+pub const SCREEN_FULL: &str = "Full Screen";
+
+/// The firmware's built-in animations, selected by `Type: "Pre-set"` and
+/// their exact ids.
+pub const PRESETS: [&str; 6] = [
+    "Pre-set 1: Cooling delivery",
+    "Pre-set 2: Migration",
+    "Pre-set 3: Quantum time capsule",
+    "Pre-set 4: Exo-Ecologies",
+    "Pre-set 5: Racing",
+    "Pre-set 6: Shuttle",
+];
+
+pub fn preset_id(number: u8) -> Option<&'static str> {
+    PRESETS.get(usize::from(number.checked_sub(1)?)).copied()
+}
+
+pub fn preset_number(id: &str) -> Option<u8> {
+    PRESETS
+        .iter()
+        .position(|preset| *preset == id)
+        .map(|index| index as u8 + 1)
+}
+
+/// `preset:N` as typed on the command line.
+pub fn parse_preset(text: &str) -> Option<u8> {
+    let number: u8 = text.strip_prefix("preset:")?.parse().ok()?;
+    preset_id(number).map(|_| number)
+}
 
 fn settings_json(settings: &DisplaySettings) -> Value {
     json!({
@@ -498,5 +527,35 @@ mod tests {
         assert_eq!(body["cpu"]["load"], 13);
         assert_eq!(body["cpu"]["speedAverage"], 4200);
         assert_eq!(body["cpu"]["power"], 66);
+    }
+
+    #[test]
+    fn presets_parse_by_number_and_round_trip() {
+        assert_eq!(parse_preset("preset:1"), Some(1));
+        assert_eq!(parse_preset("preset:6"), Some(6));
+        assert_eq!(parse_preset("preset:0"), None);
+        assert_eq!(parse_preset("preset:7"), None);
+        assert_eq!(parse_preset("clip.mp4"), None);
+        assert_eq!(preset_id(3), Some("Pre-set 3: Quantum time capsule"));
+        assert_eq!(preset_number("Pre-set 5: Racing"), Some(5));
+        assert_eq!(preset_number("Customization"), None);
+        let preset = ScreenConfig {
+            preset_id: preset_id(2).unwrap().to_string(),
+            media: vec!["clip.mp4".into()],
+            ..ScreenConfig::default()
+        };
+        let body = screen_config(&preset);
+        assert_eq!(body["Type"], "Pre-set");
+        assert_eq!(body["id"], "Pre-set 2: Migration");
+        assert!(body.get("media").is_none(), "presets carry no media list");
+        let split = ScreenConfig {
+            screen_mode: SCREEN_SPLITTING.to_string(),
+            sysinfo_display: vec!["CPU Temperature".into()],
+            sysinfo_display2: vec!["GPU Temperature".into()],
+            ..ScreenConfig::default()
+        };
+        let body = screen_config(&split);
+        assert_eq!(body["sysinfoDisplay"][1][0], "GPU Temperature");
+        assert!(body["settings"].is_array());
     }
 }

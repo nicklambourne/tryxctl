@@ -34,6 +34,8 @@ pub enum Request {
     },
     Reboot,
     Raw {
+        #[serde(default = "post")]
+        method: String,
         command: String,
         body: String,
         wait: bool,
@@ -45,6 +47,16 @@ pub enum Request {
         path: PathBuf,
         name: String,
     },
+    /// What the display shows: read from a KANALI device, or the last
+    /// applied state on the legacy firmware.
+    Readback,
+    Rotate {
+        degrees: u16,
+    },
+}
+
+fn post() -> String {
+    "POST".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +93,12 @@ pub struct DaemonStatus {
     pub product: Option<Product>,
     /// The port or USB id the daemon owns.
     pub tty: String,
+    /// Whether the link is open right now; the daemon retries every few
+    /// seconds while it is not.
+    #[serde(default)]
+    pub connected: bool,
+    #[serde(default)]
+    pub reconnects: u32,
     pub started_unix: i64,
     pub interval: u64,
     pub pushes: u64,
@@ -222,6 +240,7 @@ mod tests {
     #[test]
     fn requests_serialise_with_a_type_tag() {
         let text = serde_json::to_string(&Request::Raw {
+            method: "POST".into(),
             command: "conn".into(),
             body: String::new(),
             wait: true,

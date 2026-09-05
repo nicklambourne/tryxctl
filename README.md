@@ -44,8 +44,12 @@ tryxctl media check --target kanali-turris a.png  # ...for a display that is not
 tryxctl media upload clip.mp4 --show            # validate, convert if needed, upload, play
 tryxctl media preview clip.mp4 --at 5           # a frame exactly as the display gets it
 tryxctl show clip.mp4 --play Loop               # play something already on the display
+tryxctl show preset:3                           # one of the six built-in animations
+tryxctl display get                             # what the panel is set to
 tryxctl display set --brightness 70
+tryxctl display set --mode split --waterfall on --rotate 180
 tryxctl metrics set --labels cpu-temp,gpu-temp,cpu-usage --badges cpu,gpu
+tryxctl metrics set --area right --labels gpu-usage   # the right half in split mode
 tryxctl daemon install                          # the daemon: keepalive, live metrics, and every
                                              # command below routes through it (systemd user service)
 tryxctl daemon status                           # what it knows: device, fans, pushes, last error
@@ -61,8 +65,10 @@ tryxctl completions zsh > ~/.zfunc/_tryxctl
 The panel goes dark about a minute after the host stops talking to it, so
 `tryxctl daemon install` is the normal way to run things: the daemon owns the
 serial port, keeps the panel awake with live readings, restores the saved
-screen on start, and answers the other commands over a socket so they never
-compete for the port. Without a daemon every command opens the port itself;
+screen on start, answers the other commands over a socket so they never
+compete for the port, and reopens the link when the display reboots or is
+replugged. The legacy firmware answers no queries, so `display get` reports
+what was last applied; a KANALI display is read back for real. Without a daemon every command opens the port itself;
 `--direct` forces that. After adding yourself to `dialout`, restart your
 systemd user manager (log out fully, or `systemctl --user exit` and log in
 again) or the service will not see the new group.
@@ -82,6 +88,8 @@ rejected.
 | Overlay | up to 3 labels, incl. voltages and disk/motherboard temperature | up to 3 labels, incl. CPU/GPU power; no voltages |
 | Keepalive | sysinfo push every few seconds | ping and overlay lease every 2 s |
 | Filters, sleep, fans, reboot | yes | not in the protocol |
+| Readback | none; `display get` shows the last applied state | `display get` reads the device |
+| Pump RPM | only on models advertising `Turbo Pump`; the Panorama SE has no pump tachometer | not in the protocol |
 | Storage | `df` over ADB | none; the catalog lists sizes |
 
 ## Build from source

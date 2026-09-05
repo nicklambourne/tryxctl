@@ -15,6 +15,8 @@ pub struct DisplayState {
     pub temperature_unit: Option<String>,
     /// Fixed display-block fan speed last set, re-applied by the daemon.
     pub fan_lcd_percent: Option<u8>,
+    /// Media rotation in degrees last set, re-applied by the daemon.
+    pub rotation: Option<u16>,
 }
 
 pub fn path() -> Option<PathBuf> {
@@ -75,6 +77,7 @@ mod tests {
             gpu_name: None,
             temperature_unit: None,
             fan_lcd_percent: None,
+            rotation: None,
         };
         save_to(&file, &state).unwrap();
         assert_eq!(load_from(&file), state);

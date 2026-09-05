@@ -66,6 +66,14 @@ impl Info {
         }
     }
 
+    /// Whether the firmware reports a pump tachometer at all.
+    pub fn has_pump(&self) -> bool {
+        match self {
+            Info::Legacy(info) => info.has_pump(),
+            Info::Kanali(_) => false,
+        }
+    }
+
     pub fn summary(&self) -> String {
         format!("{} · serial {}", self.short(), self.serial())
     }
@@ -325,6 +333,7 @@ impl Connection {
     /// One raw command; `None` when sent without waiting.
     pub fn raw(
         &mut self,
+        method: &str,
         command: &str,
         body: &str,
         wait: bool,
@@ -335,6 +344,7 @@ impl Connection {
                 ..
             } => {
                 let reply = ipc::expect(&Request::Raw {
+                    method: method.to_string(),
                     command: command.to_string(),
                     body: body.to_string(),
                     wait,
@@ -351,10 +361,10 @@ impl Connection {
             }
             Connection::Direct { client, .. } => {
                 if wait {
-                    let response = client.link_mut().request(command, body)?;
+                    let response = client.link_mut().request_with(method, command, body)?;
                     Ok(Some((response.status, response.body)))
                 } else {
-                    client.link_mut().send(command, body)?;
+                    client.link_mut().send_with(method, command, body)?;
                     Ok(None)
                 }
             }
@@ -385,6 +395,47 @@ impl Connection {
                 Ok(client.send_sysinfo(&pc_info(&sample))?)
             }
             Connection::Daemon { .. } | Connection::Kanali(_) => Err(unsupported("fan readings")),
+        }
+    }
+
+    /// Rotates the media by 0, 90, 180, or 270 degrees.
+    pub fn rotate(&mut self, degrees: u16) -> Result<(), Failure> {
+        match self {
+            Connection::Daemon { .. } => ipc::expect(&Request::Rotate { degrees }).map(drop),
+            Connection::Direct { client, .. } => Ok(client.set_rotation(degrees).map(drop)?),
+            Connection::Kanali(link) => {
+                let change = tryx_kanali::Change {
+                    rotation: Some(u32::from(degrees)),
+                    ..Default::default()
+                };
+                link.device.apply(&change, link.overlay.as_ref())?;
+                Ok(())
+            }
+        }
+    }
+
+    /// What the display shows, from the device where the firmware can say
+    /// (KANALI) and from the last applied state where it cannot (legacy).
+    pub fn readback(&mut self) -> Result<Readback, Failure> {
+        match self {
+            Connection::Daemon { .. } => Ok(serde_json::from_value(
+                ipc::expect(&Request::Readback)?.value,
+            )?),
+            Connection::Direct { .. } => {
+                let saved = crate::state::load();
+                let info = self.info().ok();
+                let fans = self.fans().unwrap_or_default();
+                Ok(Readback::last_applied(&saved, info, fans))
+            }
+            Connection::Kanali(link) => {
+                let saved = crate::state::load();
+                let state = link.device.display_state()?;
+                Ok(Readback::from_kanali(
+                    &state,
+                    &saved,
+                    link.info.clone().map(Info::Kanali),
+                ))
+            }
         }
     }
 
@@ -457,6 +508,85 @@ impl Connection {
     }
 }
 
+/// What the display shows, as far as it can be known.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Readback {
+    /// `device` when read from the firmware, `last-applied` when it is what
+    /// this tool last sent (the legacy firmware answers no queries).
+    pub source: String,
+    pub protocol: Protocol,
+    pub device: Option<Info>,
+    pub media: Vec<String>,
+    pub preset: Option<String>,
+    pub play_mode: String,
+    pub screen_mode: String,
+    pub waterfall: bool,
+    pub rotation: Option<u16>,
+    pub brightness: Option<u8>,
+    pub overlay: Vec<String>,
+    pub overlay_right: Vec<String>,
+    pub badges: Vec<String>,
+    pub filter: String,
+    pub filter_opacity: u32,
+    pub sleep_with_host: bool,
+    pub fan_lcd_percent: Option<u8>,
+    pub fans: FanStatus,
+}
+
+impl Readback {
+    pub fn last_applied(saved: &DisplayState, device: Option<Info>, fans: FanStatus) -> Readback {
+        let screen = &saved.screen;
+        Readback {
+            source: "last-applied".to_string(),
+            protocol: Protocol::Legacy,
+            device,
+            media: screen.media.clone(),
+            preset: (!screen.preset_id.is_empty()).then(|| screen.preset_id.clone()),
+            play_mode: screen.play_mode.clone(),
+            screen_mode: screen.screen_mode.clone(),
+            waterfall: screen.waterfall_mode,
+            rotation: saved.rotation,
+            brightness: saved.brightness,
+            overlay: screen.sysinfo_display.clone(),
+            overlay_right: screen.sysinfo_display2.clone(),
+            badges: screen.settings.badges.clone(),
+            filter: screen.settings.filter.clone(),
+            filter_opacity: screen.settings.filter_opacity,
+            sleep_with_host: !screen.display_in_sleep,
+            fan_lcd_percent: saved.fan_lcd_percent,
+            fans,
+        }
+    }
+
+    pub fn from_kanali(
+        state: &tryx_kanali::DisplayState,
+        saved: &DisplayState,
+        device: Option<Info>,
+    ) -> Readback {
+        let screen = &saved.screen;
+        Readback {
+            source: "device".to_string(),
+            protocol: Protocol::Kanali,
+            device,
+            media: state.media.clone(),
+            preset: None,
+            play_mode: state.play_mode.clone(),
+            screen_mode: state.screen_mode.clone(),
+            waterfall: state.waterfall,
+            rotation: Some(if state.mirror { 180 } else { 0 }),
+            brightness: Some(state.brightness.min(100) as u8),
+            overlay: screen.sysinfo_display.clone(),
+            overlay_right: screen.sysinfo_display2.clone(),
+            badges: screen.settings.badges.clone(),
+            filter: String::new(),
+            filter_opacity: 0,
+            sleep_with_host: state.standby_enabled,
+            fan_lcd_percent: None,
+            fans: FanStatus::default(),
+        }
+    }
+}
+
 /// Sends the saved screen configuration the way the vendor app does:
 /// `waterBlockScreenId` (twice, with the waterfall mode), the overlay
 /// labels, and then the full `config` with `waterBlockScreen.enable`, the
@@ -471,7 +601,11 @@ pub fn apply_screen(
     client.set_sysinfo_display(&saved.screen.sysinfo_display)?;
     let brightness = saved.brightness.unwrap_or(DEFAULT_BRIGHTNESS);
     let unit = saved.temperature_unit.as_deref().unwrap_or("Celsius");
-    client.send_full_config(&saved.screen, &cpu, &gpu, brightness, unit)
+    let response = client.send_full_config(&saved.screen, &cpu, &gpu, brightness, unit)?;
+    if let Some(degrees) = saved.rotation {
+        client.set_rotation(degrees)?;
+    }
+    Ok(response)
 }
 
 /// CPU and GPU names for the badges: saved, or detected once and saved.

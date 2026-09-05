@@ -25,6 +25,63 @@ enum Owned {
     Kanali(Box<kanali::Link>),
 }
 
+/// How often to look for the display while it is gone.
+const RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
+/// Silent pushes in a row before the link is presumed dead.
+const SILENT_PUSH_LIMIT: u32 = 3;
+
+/// Whether an error means the link itself is gone, rather than the device
+/// declining one command.
+fn legacy_lost(error: &tryx_legacy::LegacyError) -> bool {
+    use tryx_legacy::LegacyError;
+    matches!(error, LegacyError::Io(_) | LegacyError::Serial { .. })
+}
+
+fn kanali_lost(error: &tryx_kanali::KanaliError) -> bool {
+    use tryx_kanali::KanaliError;
+    use tryx_kanali::transport::TransportError;
+    matches!(
+        error,
+        KanaliError::Transport(
+            TransportError::Disconnected | TransportError::Usb(_) | TransportError::Io(_)
+        )
+    )
+}
+
+/// Finds the display and opens it, filling in the identity fields.
+fn open_backend(session: &legacy::Session, status: &mut DaemonStatus) -> Result<Owned, Failure> {
+    match session.select_backend()? {
+        Backend::Legacy(target) => {
+            let mut client = session.open(&target)?;
+            status.protocol = Protocol::Legacy;
+            status.product = None;
+            status.tty = target.tty.clone();
+            let info = client
+                .handshake()
+                .map_err(|error| Failure::device(format!("handshake: {error}")))?;
+            status.info = Some(Info::Legacy(info));
+            Ok(Owned::Legacy(client))
+        }
+        Backend::Kanali { id, product } => {
+            let link = kanali::open(Some(&id), session.verbose)?;
+            status.protocol = Protocol::Kanali;
+            status.product = Some(product);
+            status.tty = id;
+            status.info = link.info.clone().map(Info::Kanali);
+            Ok(Owned::Kanali(Box::new(link)))
+        }
+    }
+}
+
+fn push_interval(owned: &Owned, interval: u64) -> Duration {
+    // The KANALI overlay wants values about every second; the serial link
+    // is happier with the slower cadence the user picked.
+    match owned {
+        Owned::Legacy(_) => Duration::from_secs(interval.max(1)),
+        Owned::Kanali(_) => Duration::from_secs(interval.clamp(1, 2)),
+    }
+}
+
 pub fn run(session: &legacy::Session, interval: u64, quiet: bool) -> CommandResult {
     if !Monitor::supported() {
         return Err(Failure::environment(
@@ -44,27 +101,22 @@ pub fn run(session: &legacy::Session, interval: u64, quiet: bool) -> CommandResu
         interval,
         ..DaemonStatus::default()
     };
-    let mut owned = match session.select_backend()? {
-        Backend::Legacy(target) => {
-            let mut client = session.open(&target)?;
-            status.protocol = Protocol::Legacy;
-            status.tty = target.tty.clone();
-            match client.handshake() {
-                Ok(info) => status.info = Some(Info::Legacy(info)),
-                Err(error) => status.last_error = Some(format!("handshake: {error}")),
-            }
-            Owned::Legacy(client)
+    // The display may not be there yet (service started before the USB
+    // device enumerated); keep looking rather than failing.
+    let mut owned = match open_backend(session, &mut status) {
+        Ok(mut owned) => {
+            restore(&mut owned, &mut status, quiet);
+            status.connected = true;
+            Some(owned)
         }
-        Backend::Kanali { id, product } => {
-            let link = kanali::open(Some(&id), session.verbose)?;
-            status.protocol = Protocol::Kanali;
-            status.product = Some(product);
-            status.tty = id;
-            status.info = link.info.clone().map(Info::Kanali);
-            Owned::Kanali(Box::new(link))
+        Err(failure) => {
+            if !quiet {
+                eprintln!("not connected: {}; retrying", failure.message);
+            }
+            status.last_error = Some(failure.message);
+            None
         }
     };
-    restore(&mut owned, &mut status, quiet);
 
     let socket = ipc::socket_path();
     if let Some(parent) = socket.parent() {
@@ -79,38 +131,79 @@ pub fn run(session: &legacy::Session, interval: u64, quiet: bool) -> CommandResu
         println!("listening on {}", socket.display());
     }
 
-    // The KANALI overlay wants values about every second; the serial link
-    // is happier with the slower cadence the user picked.
-    let push_every = match owned {
-        Owned::Legacy(_) => Duration::from_secs(interval.max(1)),
-        Owned::Kanali(_) => Duration::from_secs(interval.clamp(1, 2)),
-    };
     let mut monitor = Monitor::new();
     let mut next_push = Instant::now();
     let mut next_keepalive = Instant::now();
+    let mut next_reconnect = Instant::now() + RECONNECT_INTERVAL;
+    let mut silent_pushes = 0u32;
     loop {
-        let next = match owned {
-            Owned::Legacy(_) => next_push,
-            Owned::Kanali(_) => next_push.min(next_keepalive),
+        let next = match &owned {
+            Some(Owned::Legacy(_)) => next_push,
+            Some(Owned::Kanali(_)) => next_push.min(next_keepalive),
+            None => next_reconnect,
         };
         match rx.recv_timeout(next.saturating_duration_since(Instant::now())) {
             Ok((request, reply_tx)) => {
-                let reply = handle(&mut owned, &mut status, request);
+                let (reply, lost) = handle(&mut owned, &mut status, request);
                 let _ = reply_tx.send(reply);
+                if lost {
+                    disconnect(&mut owned, &mut status, quiet);
+                    next_reconnect = Instant::now() + RECONNECT_INTERVAL;
+                }
             }
             Err(RecvTimeoutError::Timeout) => {
                 let now = Instant::now();
-                if let Owned::Kanali(link) = &mut owned
-                    && now >= next_keepalive
-                {
-                    if let Err(error) = link.keepalive() {
-                        status.last_error = Some(format!("keepalive: {error}"));
+                match owned.as_mut() {
+                    None => {
+                        if now >= next_reconnect {
+                            match open_backend(session, &mut status) {
+                                Ok(mut reopened) => {
+                                    status.reconnects += 1;
+                                    status.last_error = None;
+                                    if !quiet {
+                                        println!("reconnected to {}", status.tty);
+                                    }
+                                    restore(&mut reopened, &mut status, quiet);
+                                    status.connected = true;
+                                    owned = Some(reopened);
+                                    silent_pushes = 0;
+                                    next_push = now;
+                                    next_keepalive = now;
+                                }
+                                Err(failure) => {
+                                    status.last_error = Some(failure.message);
+                                    next_reconnect = now + RECONNECT_INTERVAL;
+                                }
+                            }
+                        }
                     }
-                    next_keepalive = now + tryx_kanali::KEEPALIVE_INTERVAL;
-                }
-                if now >= next_push {
-                    push(&mut owned, &mut status, &mut monitor, quiet);
-                    next_push = now + push_every;
+                    Some(current) => {
+                        let mut lost = false;
+                        if let Owned::Kanali(link) = current
+                            && now >= next_keepalive
+                        {
+                            if let Err(error) = link.keepalive() {
+                                lost |= kanali_lost(&error);
+                                status.last_error = Some(format!("keepalive: {error}"));
+                            }
+                            next_keepalive = now + tryx_kanali::KEEPALIVE_INTERVAL;
+                        }
+                        if now >= next_push {
+                            match push(current, &mut status, &mut monitor, quiet) {
+                                Ok(()) => silent_pushes = 0,
+                                Err(dead) => {
+                                    silent_pushes += 1;
+                                    lost |= dead || silent_pushes >= SILENT_PUSH_LIMIT;
+                                }
+                            }
+                            next_push = now + push_interval(current, interval);
+                        }
+                        if lost {
+                            disconnect(&mut owned, &mut status, quiet);
+                            next_reconnect = now + RECONNECT_INTERVAL;
+                            silent_pushes = 0;
+                        }
+                    }
                 }
             }
             Err(RecvTimeoutError::Disconnected) => break,
@@ -120,15 +213,29 @@ pub fn run(session: &legacy::Session, interval: u64, quiet: bool) -> CommandResu
     Ok(exit::ok())
 }
 
+/// Drops the link so the next tick looks for the display again.
+fn disconnect(owned: &mut Option<Owned>, status: &mut DaemonStatus, quiet: bool) {
+    if owned.take().is_some() {
+        status.connected = false;
+        if !quiet {
+            eprintln!(
+                "lost the display ({}); retrying every {} s",
+                status.last_error.as_deref().unwrap_or("no error recorded"),
+                RECONNECT_INTERVAL.as_secs()
+            );
+        }
+    }
+}
+
 fn restore(owned: &mut Owned, status: &mut DaemonStatus, quiet: bool) {
     let mut saved = state::load();
     match owned {
         Owned::Legacy(client) => {
-            if !saved.screen.media.is_empty() {
+            if !saved.screen.media.is_empty() || !saved.screen.preset_id.is_empty() {
                 match legacy::apply_screen(client, &mut saved) {
                     Ok(_) => {
                         if !quiet {
-                            println!("restored {}", saved.screen.media.join(", "));
+                            println!("restored {}", describe_screen(&saved.screen));
                         }
                     }
                     Err(error) => status.last_error = Some(format!("restore: {error}")),
@@ -145,7 +252,8 @@ fn restore(owned: &mut Owned, status: &mut DaemonStatus, quiet: bool) {
             // host was asked to show.
             let wants_overlay = !saved.screen.sysinfo_display.is_empty()
                 || !saved.screen.settings.badges.is_empty();
-            if !saved.screen.media.is_empty() || wants_overlay {
+            if !saved.screen.media.is_empty() || !saved.screen.preset_id.is_empty() || wants_overlay
+            {
                 match link.apply_state(&saved) {
                     Ok(_) => {
                         if !quiet {
@@ -166,7 +274,9 @@ fn restore(owned: &mut Owned, status: &mut DaemonStatus, quiet: bool) {
 }
 
 fn describe_screen(screen: &tryx_legacy::ScreenConfig) -> String {
-    let media = if screen.media.is_empty() {
+    let media = if !screen.preset_id.is_empty() {
+        screen.preset_id.clone()
+    } else if screen.media.is_empty() {
         "the device's media".to_string()
     } else {
         screen.media.join(", ")
@@ -178,7 +288,13 @@ fn describe_screen(screen: &tryx_legacy::ScreenConfig) -> String {
     }
 }
 
-fn push(owned: &mut Owned, status: &mut DaemonStatus, monitor: &mut Monitor, quiet: bool) {
+/// One metrics push. `Err(true)` means the link is gone.
+fn push(
+    owned: &mut Owned,
+    status: &mut DaemonStatus,
+    monitor: &mut Monitor,
+    quiet: bool,
+) -> Result<(), bool> {
     let mut sample = monitor.sample();
     let result = match owned {
         Owned::Legacy(client) => {
@@ -186,40 +302,64 @@ fn push(owned: &mut Owned, status: &mut DaemonStatus, monitor: &mut Monitor, qui
             client
                 .send_sysinfo(&pc_info(&sample))
                 .map(|fans| status.fans = fans)
-                .map_err(|error| error.to_string())
+                .map_err(|error| (error.to_string(), legacy_lost(&error)))
         }
-        Owned::Kanali(link) => link.push(&sample).map_err(|error| error.to_string()),
+        Owned::Kanali(link) => link
+            .push(&sample)
+            .map_err(|error| (error.to_string(), kanali_lost(&error))),
     };
+    status.sample = Some(sample);
     match result {
         Ok(()) => {
             status.pushes += 1;
             status.last_error = None;
+            Ok(())
         }
-        Err(error) => {
-            status.last_error = Some(format!("push: {error}"));
+        Err((message, lost)) => {
+            status.last_error = Some(format!("push: {message}"));
             if !quiet {
-                eprintln!("push failed: {error}");
+                eprintln!("push failed: {message}");
             }
+            Err(lost)
         }
     }
-    status.sample = Some(sample);
 }
 
-fn handle(owned: &mut Owned, status: &mut DaemonStatus, request: Request) -> Reply {
-    let result: Result<Reply, String> = match (owned, request) {
-        (_, Request::Status) => Ok(Reply::ok(&*status)),
+/// Answers one request. The flag says the link was found dead.
+fn handle(owned: &mut Option<Owned>, status: &mut DaemonStatus, request: Request) -> (Reply, bool) {
+    if let Request::Status = request {
+        return (Reply::ok(&*status), false);
+    }
+    let Some(owned) = owned.as_mut() else {
+        return (
+            Reply::error(format!(
+                "the display is disconnected; the daemon retries every {} s",
+                RECONNECT_INTERVAL.as_secs()
+            )),
+            false,
+        );
+    };
+    let legacy_error = |error: tryx_legacy::LegacyError| (error.to_string(), legacy_lost(&error));
+    let kanali_error = |error: tryx_kanali::KanaliError| (error.to_string(), kanali_lost(&error));
+    let result: Result<Reply, (String, bool)> = match (owned, request) {
+        (_, Request::Status) => unreachable!("answered above"),
         (Owned::Legacy(client), Request::Info) => client
             .handshake()
             .map(|info| {
                 status.info = Some(Info::Legacy(info.clone()));
                 Reply::ok(Info::Legacy(info))
             })
-            .map_err(|e| e.to_string()),
+            .map_err(legacy_error),
         (Owned::Kanali(link), Request::Info) => link
             .info
             .clone()
             .map(|info| Reply::ok(Info::Kanali(info)))
-            .ok_or_else(|| "this product reports no device information".to_string()),
+            .ok_or_else(|| {
+                (
+                    "this product reports no device information".to_string(),
+                    false,
+                )
+            }),
         (Owned::Legacy(client), Request::Apply { state }) => {
             let mut state = *state;
             legacy::apply_screen(client, &mut state)
@@ -228,7 +368,7 @@ fn handle(owned: &mut Owned, status: &mut DaemonStatus, request: Request) -> Rep
                     let _ = crate::state::save(&state);
                     Reply::ok(json!({"status": response.status}))
                 })
-                .map_err(|e| e.to_string())
+                .map_err(legacy_error)
         }
         (Owned::Kanali(link), Request::Apply { state }) => link
             .apply_state(&state)
@@ -237,36 +377,70 @@ fn handle(owned: &mut Owned, status: &mut DaemonStatus, request: Request) -> Rep
                 let _ = crate::state::save(&state);
                 Reply::ok(json!({"status": word}))
             })
-            .map_err(|f| f.message),
+            .map_err(|f| (f.message, false)),
         (Owned::Legacy(client), Request::Brightness { value }) => client
             .set_brightness(value)
             .map(|r| Reply::ok(json!({"status": r.status})))
-            .map_err(|e| e.to_string()),
+            .map_err(legacy_error),
         (Owned::Kanali(link), Request::Brightness { value }) => link
             .device
             .set_brightness(u32::from(value))
             .map(|_| Reply::ok(json!({"status": "applied"})))
-            .map_err(|e| e.to_string()),
+            .map_err(kanali_error),
+        (Owned::Legacy(client), Request::Rotate { degrees }) => client
+            .set_rotation(degrees)
+            .map(|r| Reply::ok(json!({"status": r.status})))
+            .map_err(legacy_error),
+        (Owned::Kanali(link), Request::Rotate { degrees }) => {
+            let change = tryx_kanali::Change {
+                rotation: Some(u32::from(degrees)),
+                ..Default::default()
+            };
+            link.device
+                .apply(&change, link.overlay.as_ref())
+                .map(|_| Reply::ok(json!({"status": "applied"})))
+                .map_err(kanali_error)
+        }
+        (Owned::Legacy(_), Request::Readback) => Ok(Reply::ok(legacy::Readback::last_applied(
+            &state::load(),
+            status.info.clone(),
+            status.fans.clone(),
+        ))),
+        (Owned::Kanali(link), Request::Readback) => link
+            .device
+            .display_state()
+            .map(|device_state| {
+                Reply::ok(legacy::Readback::from_kanali(
+                    &device_state,
+                    &state::load(),
+                    link.info.clone().map(Info::Kanali),
+                ))
+            })
+            .map_err(kanali_error),
         (Owned::Legacy(client), Request::DeleteMedia { names }) => client
             .delete_media(&names)
             .map(|r| Reply::ok(json!({"status": r.status})))
-            .map_err(|e| e.to_string()),
+            .map_err(legacy_error),
         (Owned::Kanali(link), Request::DeleteMedia { names }) => names
             .iter()
             .try_for_each(|name| link.device.delete(name))
             .map(|()| Reply::ok(json!({"status": "applied"})))
-            .map_err(|e| e.to_string()),
+            .map_err(kanali_error),
         (Owned::Legacy(client), Request::FanLcd { percent }) => client
             .set_fan_lcd(percent)
             .map(|r| Reply::ok(json!({"status": r.status})))
-            .map_err(|e| e.to_string()),
+            .map_err(legacy_error),
+        // The panel goes away to reboot; drop the link now rather than
+        // waiting for the pushes to fail.
         (Owned::Legacy(client), Request::Reboot) => client
             .reboot()
             .map(|r| Reply::ok(json!({"status": r.status})))
-            .map_err(|e| e.to_string()),
+            .map_err(legacy_error)
+            .and_then(|reply| Err((format!("rebooting ({})", reply.value["status"]), true))),
         (
             Owned::Legacy(client),
             Request::Raw {
+                method,
                 command,
                 body,
                 wait,
@@ -275,39 +449,43 @@ fn handle(owned: &mut Owned, status: &mut DaemonStatus, request: Request) -> Rep
             if wait {
                 client
                     .link_mut()
-                    .request(&command, &body)
+                    .request_with(&method, &command, &body)
                     .map(|r| Reply::ok(json!({"status": r.status, "body": r.body})))
-                    .map_err(|e| e.to_string())
+                    .map_err(legacy_error)
             } else {
                 client
                     .link_mut()
-                    .send(&command, &body)
+                    .send_with(&method, &command, &body)
                     .map(|()| Reply::ok(json!({"sent": true})))
-                    .map_err(|e| e.to_string())
+                    .map_err(legacy_error)
             }
         }
-        (Owned::Kanali(link), Request::Catalog) => link
-            .device
-            .catalog()
-            .map(Reply::ok)
-            .map_err(|e| e.to_string()),
+        (Owned::Kanali(link), Request::Catalog) => {
+            link.device.catalog().map(Reply::ok).map_err(kanali_error)
+        }
         (Owned::Kanali(link), Request::Upload { path, name }) => link
             .device
             .upload(&path, &name, |_, _| {})
             .map(|()| Reply::ok(json!({"uploaded": name})))
-            .map_err(|e| e.to_string()),
+            .map_err(kanali_error),
         (Owned::Kanali(_), Request::FanLcd { .. } | Request::Reboot | Request::Raw { .. }) => {
-            Err("not available on the KANALI firmware".to_string())
+            Err(("not available on the KANALI firmware".to_string(), false))
         }
-        (Owned::Legacy(_), Request::Catalog | Request::Upload { .. }) => {
-            Err("the legacy firmware manages media over adb".to_string())
-        }
+        (Owned::Legacy(_), Request::Catalog | Request::Upload { .. }) => Err((
+            "the legacy firmware manages media over adb".to_string(),
+            false,
+        )),
     };
     match result {
-        Ok(reply) => reply,
-        Err(message) => {
+        Ok(reply) => (reply, false),
+        // A reboot is reported as success to the caller.
+        Err((message, true)) if message.starts_with("rebooting") => {
             status.last_error = Some(message.clone());
-            Reply::error(message)
+            (Reply::ok(json!({"status": "200", "rebooting": true})), true)
+        }
+        Err((message, lost)) => {
+            status.last_error = Some(message.clone());
+            (Reply::error(message), lost)
         }
     }
 }
@@ -471,12 +649,21 @@ pub fn status(json: bool) -> CommandResult {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
         - status.started_unix;
-    let fans = match (status.fans.lcd_fan_rpm, status.fans.pump_rpm) {
-        (Some(fan), Some(pump)) => format!("LCD fan {fan} rpm, pump {pump} rpm"),
-        (Some(fan), None) => format!("LCD fan {fan} rpm"),
-        (None, Some(pump)) => format!("pump {pump} rpm"),
-        (None, None) => "not reported".to_string(),
+    let has_pump = status.info.as_ref().map(Info::has_pump);
+    let fans = match (status.fans.lcd_fan_rpm, status.fans.pump_rpm, has_pump) {
+        (Some(fan), Some(pump), _) => format!("LCD fan {fan} rpm, pump {pump} rpm"),
+        (Some(fan), None, Some(false)) => {
+            format!("LCD fan {fan} rpm; no pump tachometer on this model")
+        }
+        (Some(fan), None, _) => format!("LCD fan {fan} rpm"),
+        (None, Some(pump), _) => format!("pump {pump} rpm"),
+        (None, None, _) => "not reported".to_string(),
     };
+    let storage = status
+        .fans
+        .available_storage
+        .map(crate::output::human_bytes)
+        .unwrap_or_else(|| "unknown".to_string());
     let device = status
         .info
         .as_ref()
@@ -487,7 +674,14 @@ pub fn status(json: bool) -> CommandResult {
         crate::output::key_values(&[
             ("Device", device),
             ("Protocol", status.protocol.label().to_string()),
-            ("Link", status.tty.clone()),
+            (
+                "Link",
+                if status.connected {
+                    status.tty.clone()
+                } else {
+                    format!("{} (disconnected, retrying)", status.tty)
+                },
+            ),
             (
                 "Uptime",
                 format!(
@@ -512,6 +706,8 @@ pub fn status(json: bool) -> CommandResult {
                 }
             ),
             ("Fans", fans),
+            ("Free storage", storage),
+            ("Reconnects", status.reconnects.to_string()),
             (
                 "Last error",
                 status.last_error.clone().unwrap_or_else(|| "none".into())

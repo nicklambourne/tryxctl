@@ -130,6 +130,10 @@ pub struct Change {
     pub play_mode: Option<String>,
     pub brightness: Option<u32>,
     pub backlight: Option<bool>,
+    /// Portrait orientation (`ui_rotation` 90).
+    pub waterfall: Option<bool>,
+    /// Media rotation in degrees (`media_rotation`).
+    pub rotation: Option<u32>,
 }
 
 pub struct Device {
@@ -259,8 +263,20 @@ impl Device {
             self.product.capabilities().display_configuration,
             "display configuration",
         )?;
-        if change.media.is_none() && change.brightness.is_none() && change.backlight.is_none() {
+        if change.media.is_none()
+            && change.brightness.is_none()
+            && change.backlight.is_none()
+            && change.waterfall.is_none()
+            && change.rotation.is_none()
+        {
             return Err(KanaliError::Invalid("the change is empty".into()));
+        }
+        if let Some(rotation) = change.rotation
+            && !matches!(rotation, 0 | 90 | 180 | 270)
+        {
+            return Err(KanaliError::Invalid(
+                "rotation must be 0, 90, 180, or 270".into(),
+            ));
         }
         if let Some(brightness) = change.brightness
             && brightness > 100
@@ -296,13 +312,23 @@ impl Device {
                 work.single_mode_media_file = media[0].clone();
             }
         }
-        if change.brightness.is_some() || change.backlight.is_some() {
+        if change.brightness.is_some()
+            || change.backlight.is_some()
+            || change.waterfall.is_some()
+            || change.rotation.is_some()
+        {
             let display = config.display_config.get_or_insert_with(Default::default);
             if let Some(brightness) = change.brightness {
                 display.backlight_brightness = brightness;
             }
             if let Some(backlight) = change.backlight {
                 display.backlight_enable = backlight;
+            }
+            if let Some(waterfall) = change.waterfall {
+                display.ui_rotation = if waterfall { 90 } else { 0 };
+            }
+            if let Some(rotation) = change.rotation {
+                display.media_rotation = rotation;
             }
         }
 
@@ -333,6 +359,11 @@ impl Device {
             && state.brightness != brightness
         {
             mismatches.push("brightness");
+        }
+        if let Some(waterfall) = change.waterfall
+            && state.waterfall != waterfall
+        {
+            mismatches.push("waterfall");
         }
         if !mismatches.is_empty() {
             return Err(KanaliError::InvalidResponse {

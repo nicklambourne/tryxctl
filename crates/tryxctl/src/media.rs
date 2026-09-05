@@ -477,6 +477,7 @@ pub fn ls(json: bool, session: &legacy::Session) -> CommandResult {
                 "directory": adb::MEDIA_DIR,
                 "files": files,
                 "storage": storage,
+                "presets": tryx_legacy::commands::PRESETS,
             }))?
         );
         return Ok(exit::ok());
@@ -498,6 +499,19 @@ pub fn ls(json: bool, session: &legacy::Session) -> CommandResult {
         adb::MEDIA_DIR,
         output::human_bytes(storage.available_kib * 1024),
         output::human_bytes(storage.total_kib * 1024),
+    );
+    println!(
+        "Built-in animations: {}",
+        tryx_legacy::commands::PRESETS
+            .iter()
+            .enumerate()
+            .map(|(index, name)| format!(
+                "preset:{} {}",
+                index + 1,
+                name.split(": ").nth(1).unwrap_or(name)
+            ))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     Ok(exit::ok())
 }

@@ -172,15 +172,36 @@ pub fn overlay_from(saved: &DisplayState) -> Result<Option<OverlayConfig>, Failu
     }))
 }
 
+/// The catalog file behind a legacy preset id on the KANALI firmware.
+pub fn preset_file(number: u8) -> Option<String> {
+    let index = match number {
+        1 => "01",
+        2 => "02",
+        3 => "04",
+        4 => "03",
+        5 => "05",
+        6 => "06",
+        _ => return None,
+    };
+    Some(format!("default_{index}.mp4.h264_2240x1080"))
+}
+
 /// The configuration change implied by the shared state.
 pub fn change_from(saved: &DisplayState) -> Change {
     let screen = &saved.screen;
+    let media = match tryx_legacy::commands::preset_number(&screen.preset_id).and_then(preset_file)
+    {
+        Some(preset) => Some(vec![preset]),
+        None => (!screen.media.is_empty()).then(|| screen.media.clone()),
+    };
     Change {
-        media: (!screen.media.is_empty()).then(|| screen.media.clone()),
+        media,
         split_screen: screen.screen_mode == SCREEN_SPLITTING,
         play_mode: Some(screen.play_mode.clone()),
         brightness: saved.brightness.map(u32::from),
         backlight: None,
+        waterfall: Some(screen.waterfall_mode),
+        rotation: saved.rotation.map(u32::from),
     }
 }
 
@@ -231,7 +252,7 @@ impl Link {
     pub fn apply_state(&mut self, saved: &DisplayState) -> Result<String, Failure> {
         let overlay = overlay_from(saved)?;
         let change = change_from(saved);
-        if change.media.is_some() || change.brightness.is_some() {
+        if change.media.is_some() || change.brightness.is_some() || change.rotation.is_some() {
             self.device.apply(&change, overlay.as_ref())?;
         } else if let Some(overlay) = &overlay {
             self.device.configure_overlay(overlay)?;
@@ -292,6 +313,7 @@ mod tests {
             gpu_name: None,
             temperature_unit: Some("Fahrenheit".into()),
             fan_lcd_percent: None,
+            rotation: None,
         };
         let overlay = overlay_from(&saved).unwrap().unwrap();
         assert_eq!(
@@ -307,6 +329,13 @@ mod tests {
         assert_eq!(
             change.media.as_deref(),
             Some(&["clip.mp4.h264_2240x1080".to_string()][..])
+        );
+        assert_eq!(change.waterfall, Some(false));
+        let mut preset = saved.clone();
+        preset.screen.preset_id = "Pre-set 3: Quantum time capsule".into();
+        assert_eq!(
+            change_from(&preset).media.as_deref(),
+            Some(&["default_04.mp4.h264_2240x1080".to_string()][..])
         );
         assert_eq!(change.play_mode.as_deref(), Some("Loop"));
         assert_eq!(change.brightness, Some(40));
