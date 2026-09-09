@@ -42,7 +42,12 @@ tryxctl media ls                                # files on the display and free 
 tryxctl media check clip.mp4                    # what would change, and why
 tryxctl media check --target kanali-turris a.png  # ...for a display that is not connected
 tryxctl media upload clip.mp4 --show            # validate, convert if needed, upload, play
+tryxctl media upload long.mp4 --trim 30-90      # only part of a video
 tryxctl media preview clip.mp4 --at 5           # a frame exactly as the display gets it
+tryxctl media export clip.mp4 -o backup.mp4     # a copy of a file on the display
+tryxctl media replace clip.mp4 new.mp4          # swap the file under its name, no gap
+tryxctl op ls                                   # recent transfers; a failed one keeps its encode
+tryxctl op retry 6aa17661ce3f                   # send it again without re-encoding
 tryxctl show clip.mp4 --play Loop               # play something already on the display
 tryxctl show preset:3                           # one of the six built-in animations
 tryxctl display get                             # what the panel is set to
@@ -55,10 +60,13 @@ tryxctl daemon install                          # the daemon: keepalive, live me
 tryxctl daemon status                           # what it knows: device, fans, pushes, last error
 tryxctl fans --watch 5                          # LCD fan and pump RPM from the display
 tryxctl fans --lcd-speed 40                     # fixed display-block fan speed
+tryxctl fans --lcd-speed auto                   # back to the firmware's curve
+tryxctl metrics status --watch 2                # host readings every 2 s
 tryxctl display set --filter smoke --filter-opacity 60
 tryxctl display set --sleep on                  # let the panel sleep with the host
 tryxctl display reboot
-tryxctl tui                                     # all of the above, interactively
+tryxctl tui                                     # all of the above, interactively:
+                                                # devices, library, overlay, display, transfers
 tryxctl completions zsh > ~/.zfunc/_tryxctl
 ```
 
@@ -66,15 +74,16 @@ The panel goes dark about a minute after the host stops talking to it, so
 `tryxctl daemon install` is the normal way to run things: the daemon owns the
 serial port, keeps the panel awake with live readings, restores the saved
 screen on start, answers the other commands over a socket so they never
-compete for the port, and reopens the link when the display reboots or is
-replugged. The legacy firmware answers no queries, so `display get` reports
+compete for the port, reopens the link when the display reboots or is
+replugged, and applies the screen again after the host wakes from sleep. The legacy firmware answers no queries, so `display get` reports
 what was last applied; a KANALI display is read back for real. Without a daemon every command opens the port itself;
 `--direct` forces that. After adding yourself to `dialout`, restart your
 systemd user manager (log out fully, or `systemctl --user exit` and log in
 again) or the service will not see the new group.
 
-Every command takes `--json` for machine-readable output and `-v` to dump the
-frames exchanged with the display. With several displays attached, `--tty`
+Every command takes `--json` for machine-readable output, `-q` for results
+and errors only, `--no-color`, and `-v` to dump the frames exchanged with
+the display. With several displays attached, `--tty`
 picks a legacy serial port and `--device` a KANALI USB id (both listed by
 `tryxctl devices`). Exit codes: 2 usage, 3 device, 4 environment, 5 media
 rejected.
