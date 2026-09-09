@@ -656,7 +656,7 @@ impl App {
                     let marker = if showing { "▶ " } else { "  " };
                     ListItem::new(Line::from(vec![
                         Span::raw(marker).fg(Color::Green),
-                        Span::raw(format!("{:<40}", format!("preset:{number}  {id}"))),
+                        Span::raw(format!("{:<44}", format!("preset:{number}  {id}"))),
                         Span::raw("built-in").dim(),
                     ]))
                 }
@@ -667,7 +667,7 @@ impl App {
                     let marker = if showing { "▶ " } else { "  " };
                     ListItem::new(Line::from(vec![
                         Span::raw(marker).fg(Color::Green),
-                        Span::raw(format!("{:<40}", file.name)),
+                        Span::raw(format!("{:<44}", file.name)),
                         Span::raw(output::human_bytes(file.size)).dim(),
                     ]))
                 }
@@ -963,10 +963,14 @@ impl App {
             ))
             .fg(Color::Cyan),
             (None, None, Some(error)) => Line::from(format!("error: {error}")).fg(Color::Red),
-            (None, None, None) if self.wizard.is_some() => {
-                Line::from("m mode · r rotate · +/- zoom · p preview · Enter upload · Esc back")
-                    .dim()
-            }
+            (None, None, None) if self.wizard.is_some() => Line::from(
+                if self.status.starts_with("preview") || self.status.starts_with("rendering") {
+                    self.status.clone()
+                } else {
+                    "m mode · r rotate · +/- zoom · p preview · Enter upload · Esc back".to_string()
+                },
+            )
+            .dim(),
             (None, None, None) => Line::from(format!(
                 "{}   q quits · Tab switches · r refreshes",
                 self.status
