@@ -513,8 +513,13 @@ impl WorkerState {
         let target = self.connection()?.media_target();
         let analysis = media::analyse(&ffprobe, path, &options, target);
         let kind = analysis.report.kind.ok_or("not a media file")?;
-        let output =
-            std::env::temp_dir().join(format!("tryxctl-preview-{}.png", std::process::id()));
+        // A stable place: the temp dir vanishes with a nix shell.
+        let output = ops::cache_dir()
+            .and_then(|dir| dir.parent().map(|parent| parent.join("preview.png")))
+            .unwrap_or_else(|| std::env::temp_dir().join("tryxctl-preview.png"));
+        if let Some(parent) = output.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         preview::render_frame(
             &ffmpeg,
             path,
