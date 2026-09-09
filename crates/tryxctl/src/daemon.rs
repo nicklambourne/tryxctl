@@ -59,9 +59,16 @@ fn open_backend(session: &legacy::Session, status: &mut DaemonStatus) -> Result<
             status.protocol = Protocol::Legacy;
             status.product = None;
             status.tty = target.tty.clone();
-            let info = client
+            let mut info = client
                 .handshake()
                 .map_err(|error| Failure::device(format!("handshake: {error}")))?;
+            if info.product_id == "unknown" {
+                // A stale reply from whoever held the port a moment ago.
+                std::thread::sleep(Duration::from_millis(300));
+                info = client
+                    .handshake()
+                    .map_err(|error| Failure::device(format!("handshake: {error}")))?;
+            }
             status.info = Some(Info::Legacy(info));
             Ok(Owned::Legacy(client))
         }
