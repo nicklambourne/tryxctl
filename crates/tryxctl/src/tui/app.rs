@@ -7,6 +7,7 @@ use crate::metrics::LABELS;
 use crate::ops::{Outcome, Record};
 use crate::{output, state};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use image::DynamicImage;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -14,6 +15,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Gauge, List, ListItem, ListState, Paragraph, Row, Table, Tabs, Wrap,
 };
+use ratatui_image::StatefulImage;
+use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::protocol::StatefulProtocol;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -80,6 +85,17 @@ const ALIGNMENTS: [&str; 3] = ["Left", "Center", "Right"];
 const MODES: [&str; 4] = ["fit", "fill", "crop", "stretch"];
 const ROTATIONS: [u32; 4] = [0, 90, 180, 270];
 const DEGREES: [u16; 4] = [0, 90, 180, 270];
+/// Pictures kept ready to draw.
+const PREVIEW_CACHE: usize = 12;
+
+fn protocol_name(protocol: ProtocolType) -> &'static str {
+    match protocol {
+        ProtocolType::Kitty => "kitty graphics",
+        ProtocolType::Iterm2 => "iTerm2 images",
+        ProtocolType::Sixel => "sixel",
+        ProtocolType::Halfblocks => "half-blocks",
+    }
+}
 
 pub struct App {
     requests: Sender<Request>,
@@ -101,6 +117,11 @@ pub struct App {
     upload: Option<(String, f64)>,
     prompt: Option<Prompt>,
     wizard: Option<Wizard>,
+    picker: Picker,
+    previews: HashMap<String, StatefulProtocol>,
+    preview_order: VecDeque<String>,
+    preview_failures: HashMap<String, String>,
+    preview_requested: HashSet<String>,
     readback: Option<Readback>,
     operations: Vec<Record>,
     op_list: ListState,
@@ -109,7 +130,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(requests: Sender<Request>, cancel: Arc<AtomicBool>) -> Self {
+    pub fn new(requests: Sender<Request>, cancel: Arc<AtomicBool>, picker: Picker) -> Self {
         let saved = state::load();
         let mut list = ListState::default();
         list.select(Some(0));
@@ -133,6 +154,11 @@ impl App {
             upload: None,
             prompt: None,
             wizard: None,
+            picker,
+            previews: HashMap::new(),
+            preview_order: VecDeque::new(),
+            preview_failures: HashMap::new(),
+            preview_requested: HashSet::new(),
             readback: None,
             operations: Vec::new(),
             op_list: ListState::default(),
@@ -143,6 +169,59 @@ impl App {
 
     fn send(&self, request: Request) {
         let _ = self.requests.send(request);
+    }
+
+    fn store_preview(&mut self, key: String, image: DynamicImage) {
+        let protocol = self.picker.new_resize_protocol(image);
+        if self.previews.insert(key.clone(), protocol).is_none() {
+            self.preview_order.push_back(key);
+        }
+        while self.preview_order.len() > PREVIEW_CACHE {
+            if let Some(old) = self.preview_order.pop_front() {
+                self.previews.remove(&old);
+                self.preview_requested.remove(&old);
+            }
+        }
+    }
+
+    /// Asks the worker for a picture once; later renders find it ready.
+    fn ensure_preview(&mut self, key: &str, request: impl FnOnce() -> Request) {
+        if self.previews.contains_key(key)
+            || self.preview_failures.contains_key(key)
+            || self.preview_requested.contains(key)
+        {
+            return;
+        }
+        self.preview_requested.insert(key.to_string());
+        self.send(request());
+    }
+
+    fn wizard_key(wizard: &Wizard) -> String {
+        format!(
+            "wizard:{}|{}",
+            wizard.path.display(),
+            serde_json::to_string(&wizard.transform).unwrap_or_default()
+        )
+    }
+
+    /// Draws the picture for `key`, or says why there is none.
+    fn render_preview(&mut self, frame: &mut Frame, area: Rect, key: &str, waiting: &str) {
+        let title = format!(" Preview · {} ", protocol_name(self.picker.protocol_type()));
+        let block = Block::bordered().title(title);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if let Some(protocol) = self.previews.get_mut(key) {
+            frame.render_stateful_widget(StatefulImage::default(), inner, protocol);
+            return;
+        }
+        let text = match self.preview_failures.get(key) {
+            Some(reason) => reason.clone(),
+            None => waiting.to_string(),
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(text).dim()).wrap(Wrap { trim: true }),
+            inner,
+        );
     }
 
     pub fn handle_event(&mut self, event: Event) {
@@ -184,6 +263,10 @@ impl App {
                 }
             }
             Event::Readback(readback) => self.readback = Some(*readback),
+            Event::Preview { key, image } => self.store_preview(key, *image),
+            Event::PreviewFailed { key, reason } => {
+                self.preview_failures.insert(key, reason);
+            }
             Event::Operations(records) => {
                 self.operations = records;
                 let count = self.operations.len();
@@ -288,6 +371,21 @@ impl App {
             transform: Box::new(wizard.transform.clone()),
         });
         self.wizard = Some(wizard);
+        self.request_wizard_preview();
+    }
+
+    fn request_wizard_preview(&mut self) {
+        let Some(wizard) = &self.wizard else {
+            return;
+        };
+        let key = Self::wizard_key(wizard);
+        let (path, transform) = (wizard.path.clone(), wizard.transform.clone());
+        let request_key = key.clone();
+        self.ensure_preview(&key, move || Request::Preview {
+            key: request_key,
+            path,
+            transform: Box::new(transform),
+        });
     }
 
     fn handle_wizard_key(&mut self, key: KeyEvent) {
@@ -315,15 +413,6 @@ impl App {
                 let zoom = wizard.transform.zoom.unwrap_or(100);
                 wizard.transform.zoom = Some(zoom.saturating_sub(25).max(100));
             }
-            KeyCode::Char('p') => {
-                let (path, transform) = (wizard.path.clone(), wizard.transform.clone());
-                self.status = "rendering the preview…".to_string();
-                self.send(Request::Preview {
-                    path,
-                    transform: Box::new(transform),
-                });
-                return;
-            }
             KeyCode::Enter => {
                 if !wizard.acceptable {
                     self.error = Some("the file cannot be prepared as it is".to_string());
@@ -347,6 +436,7 @@ impl App {
                 path,
                 transform: Box::new(transform),
             });
+            self.request_wizard_preview();
         }
     }
 
@@ -646,6 +736,21 @@ impl App {
     }
 
     fn render_library(&mut self, frame: &mut Frame, area: Rect) {
+        let [list_area, preview_area] =
+            Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .areas(area);
+        let selected = self.selected_entry();
+        if let Some(Entry::File(index)) = selected
+            && let Some(file) = self.files.get(index)
+        {
+            let (name, size) = (file.name.clone(), file.size);
+            let key = format!("thumb:{name}");
+            let request_name = name.clone();
+            self.ensure_preview(&key, move || Request::Thumbnail {
+                name: request_name,
+                size,
+            });
+        }
         let items: Vec<ListItem> = self
             .entries()
             .into_iter()
@@ -677,16 +782,39 @@ impl App {
         let list = List::new(items)
             .block(Block::bordered().title(title))
             .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
-        frame.render_stateful_widget(list, area, &mut self.list);
+        frame.render_stateful_widget(list, list_area, &mut self.list);
+        match selected {
+            Some(Entry::File(index)) => {
+                let key = format!("thumb:{}", self.files[index].name);
+                self.render_preview(
+                    frame,
+                    preview_area,
+                    &key,
+                    "generating the preview… (a file without a front index is pulled once)",
+                );
+            }
+            Some(Entry::Preset(_)) => {
+                let block = Block::bordered().title(" Preview ");
+                let inner = block.inner(preview_area);
+                frame.render_widget(block, preview_area);
+                frame.render_widget(
+                    Paragraph::new(Line::from("a built-in animation; no preview").dim()),
+                    inner,
+                );
+            }
+            None => {}
+        }
     }
 
-    fn render_wizard(&self, frame: &mut Frame, area: Rect) {
-        let Some(wizard) = &self.wizard else {
+    fn render_wizard(&mut self, frame: &mut Frame, area: Rect) {
+        let Some(wizard) = self.wizard.clone() else {
             return;
         };
-        let [findings_area, settings_area] =
-            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+        let [findings_area, right_area] =
+            Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
                 .areas(area);
+        let [settings_area, preview_area] =
+            Layout::vertical([Constraint::Length(7), Constraint::Min(4)]).areas(right_area);
         let lines: Vec<Line> = wizard
             .lines
             .iter()
@@ -719,7 +847,6 @@ impl App {
                 transform.zoom.unwrap_or(100)
             )),
             Line::from(""),
-            Line::from("p writes a preview PNG and shows its path.").dim(),
             Line::from("Enter uploads with these settings; Esc goes back.").dim(),
         ];
         frame.render_widget(
@@ -728,6 +855,8 @@ impl App {
                 .block(Block::bordered().title(" Transform ")),
             settings_area,
         );
+        let key = Self::wizard_key(&wizard);
+        self.render_preview(frame, preview_area, &key, "rendering the preview…");
     }
 
     fn render_overlay(&self, frame: &mut Frame, area: Rect) {
@@ -963,14 +1092,9 @@ impl App {
             ))
             .fg(Color::Cyan),
             (None, None, Some(error)) => Line::from(format!("error: {error}")).fg(Color::Red),
-            (None, None, None) if self.wizard.is_some() => Line::from(
-                if self.status.starts_with("preview") || self.status.starts_with("rendering") {
-                    self.status.clone()
-                } else {
-                    "m mode · r rotate · +/- zoom · p preview · Enter upload · Esc back".to_string()
-                },
-            )
-            .dim(),
+            (None, None, None) if self.wizard.is_some() => {
+                Line::from("m mode · r rotate · +/- zoom · Enter upload · Esc back").dim()
+            }
             (None, None, None) => Line::from(format!(
                 "{}   q quits · Tab switches · r refreshes",
                 self.status
@@ -1026,7 +1150,11 @@ mod tests {
 
     fn app_with_files() -> (App, mpsc::Receiver<Request>) {
         let (tx, rx) = mpsc::channel();
-        let mut app = App::new(tx, Arc::new(AtomicBool::new(false)));
+        let mut app = App::new(
+            tx,
+            Arc::new(AtomicBool::new(false)),
+            Picker::from_fontsize((8, 16)),
+        );
         app.handle_event(Event::Info(Info::Legacy(tryx_legacy::DeviceInfo {
             product_id: "cm01".into(),
             os: "Android".into(),
@@ -1059,7 +1187,7 @@ mod tests {
     #[test]
     fn library_renders_presets_files_storage_and_device() {
         let (mut app, _rx) = app_with_files();
-        let text = rendered(&mut app, 100, 30);
+        let text = rendered(&mut app, 130, 30);
         assert!(
             text.contains("cm01 firmware V1.0.3 · serial XYZ1"),
             "{text}"
@@ -1124,6 +1252,52 @@ mod tests {
     }
 
     #[test]
+    fn library_asks_for_a_thumbnail_once_and_draws_it() {
+        let (mut app, rx) = app_with_files();
+        for _ in 0..6 {
+            app.handle_key(KeyEvent::from(KeyCode::Down));
+        }
+        let text = rendered(&mut app, 120, 30);
+        assert!(text.contains("generating the preview"), "{text}");
+        assert!(text.contains("Preview · half-blocks"), "{text}");
+        match rx.try_recv().unwrap() {
+            Request::Thumbnail { name, size } => {
+                assert_eq!(name, "vendor.mp4");
+                assert_eq!(size, 303_549_636);
+            }
+            _ => panic!("expected a thumbnail request"),
+        }
+        rendered(&mut app, 120, 30);
+        assert!(rx.try_recv().is_err(), "the thumbnail is requested once");
+        // Two tones per cell, or the renderer would draw plain background.
+        let mut image = image::RgbImage::new(64, 32);
+        for (_, y, pixel) in image.enumerate_pixels_mut() {
+            *pixel = if y % 2 == 0 {
+                image::Rgb([200, 40, 40])
+            } else {
+                image::Rgb([40, 40, 200])
+            };
+        }
+        app.handle_event(Event::Preview {
+            key: "thumb:vendor.mp4".into(),
+            image: Box::new(DynamicImage::ImageRgb8(image)),
+        });
+        let text = rendered(&mut app, 120, 30);
+        assert!(!text.contains("generating the preview"), "{text}");
+        assert!(
+            text.contains('▀') || text.contains('▄'),
+            "half-block cells drawn: {text}"
+        );
+        app.handle_event(Event::PreviewFailed {
+            key: "thumb:clip.mp4".into(),
+            reason: "no frame could be decoded".into(),
+        });
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        let text = rendered(&mut app, 120, 30);
+        assert!(text.contains("no frame could be decoded"), "{text}");
+    }
+
+    #[test]
     fn wizard_collects_a_transform_then_uploads() {
         let (mut app, rx) = app_with_files();
         app.handle_key(KeyEvent::from(KeyCode::Char('u')));
@@ -1132,13 +1306,20 @@ mod tests {
         }
         app.handle_key(KeyEvent::from(KeyCode::Enter));
         assert!(matches!(rx.try_recv().unwrap(), Request::Analyse { .. }));
+        assert!(matches!(rx.try_recv().unwrap(), Request::Preview { .. }));
         app.handle_key(KeyEvent::from(KeyCode::Char('m')));
         app.handle_key(KeyEvent::from(KeyCode::Char('r')));
         assert!(
             matches!(rx.try_recv().unwrap(), Request::Analyse { ref transform, .. } if transform.mode.as_deref() == Some("fill"))
         );
         assert!(
+            matches!(rx.try_recv().unwrap(), Request::Preview { ref transform, .. } if transform.mode.as_deref() == Some("fill"))
+        );
+        assert!(
             matches!(rx.try_recv().unwrap(), Request::Analyse { ref transform, .. } if transform.rotate == 90)
+        );
+        assert!(
+            matches!(rx.try_recv().unwrap(), Request::Preview { ref transform, .. } if transform.rotate == 90)
         );
         app.handle_event(Event::Analysis {
             path: PathBuf::from("/tmp/a.mp4"),

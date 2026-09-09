@@ -174,7 +174,7 @@ dependencies = [
  "num-traits",
  "pastey",
  "rayon",
- "thiserror",
+ "thiserror 2.0.20",
  "v_frame",
  "y4m",
 ]
@@ -207,6 +207,16 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64-simd"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "339abbe78e73178762e23bea9dfd08e697eb3f3301cd4be981c0f78ba5859195"
+dependencies = [
+ "outref",
+ "vsimd",
+]
 
 [[package]]
 name = "bit_field"
@@ -638,6 +648,7 @@ dependencies = [
  "miniz_oxide 0.8.9",
  "num-complex",
  "pulp",
+ "rayon-core",
  "smallvec",
  "zune-inflate",
 ]
@@ -700,6 +711,17 @@ checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
  "typenum",
  "version_check",
+]
+
+[[package]]
+name = "getrandom"
+version = "0.2.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "wasi",
 ]
 
 [[package]]
@@ -776,6 +798,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
+name = "icy_sixel"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccc0a9c4770bc47b0a933256a496cfb8b6531f753ea9bccb19c6dff0ff7273fc"
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -798,6 +826,7 @@ dependencies = [
  "png",
  "qoi",
  "ravif",
+ "rayon",
  "rgb",
  "tiff",
  "zune-core",
@@ -1037,6 +1066,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ea1f30cedd69f0a2954655f7188c6a834246d2bcf1e315e2ac40c4b24dc9519"
 dependencies = [
  "cfg-if",
+ "rayon",
 ]
 
 [[package]]
@@ -1217,6 +1247,12 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "outref"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a80800c0488c3a21695ea981a54918fbb37abf04f4d0720c453632255e2ff0e"
 
 [[package]]
 name = "owo-colors"
@@ -1485,12 +1521,33 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
+dependencies = [
+ "libc",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+]
+
+[[package]]
+name = "rand"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
 dependencies = [
- "rand_chacha",
- "rand_core",
+ "rand_chacha 0.9.0",
+ "rand_core 0.9.5",
+]
+
+[[package]]
+name = "rand_chacha"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -1500,7 +1557,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
 dependencies = [
  "ppv-lite86",
- "rand_core",
+ "rand_core 0.9.5",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
+dependencies = [
+ "getrandom 0.2.17",
 ]
 
 [[package]]
@@ -1534,6 +1600,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ratatui-image"
+version = "8.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ecc67e9f7d0ac69e0f712f58b1a9d5a04d8daeeb3628f4d6b67580abb88b7cb"
+dependencies = [
+ "base64-simd",
+ "icy_sixel",
+ "image",
+ "rand 0.8.8",
+ "ratatui",
+ "rustix 0.38.44",
+ "thiserror 1.0.69",
+ "windows",
+]
+
+[[package]]
 name = "rav1e"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1560,10 +1642,10 @@ dependencies = [
  "num-traits",
  "paste",
  "profiling",
- "rand",
- "rand_chacha",
+ "rand 0.9.5",
+ "rand_chacha 0.9.0",
  "simd_helpers",
- "thiserror",
+ "thiserror 2.0.20",
  "v_frame",
  "wasm-bindgen",
 ]
@@ -1579,6 +1661,7 @@ dependencies = [
  "loop9",
  "quick-error",
  "rav1e",
+ "rayon",
  "rgb",
 ]
 
@@ -1975,11 +2058,31 @@ checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.20",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -2014,7 +2117,7 @@ dependencies = [
  "nix 0.30.1",
  "rusb",
  "serde",
- "thiserror",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2024,7 +2127,7 @@ dependencies = [
  "prost",
  "rusb",
  "serde",
- "thiserror",
+ "thiserror 2.0.20",
  "tryx-device",
  "tryx-proto",
 ]
@@ -2037,7 +2140,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serialport",
- "thiserror",
+ "thiserror 2.0.20",
  "which",
 ]
 
@@ -2048,7 +2151,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "thiserror",
+ "thiserror 2.0.20",
  "which",
 ]
 
@@ -2067,7 +2170,7 @@ version = "0.1.0"
 dependencies = [
  "prost",
  "prost-build",
- "thiserror",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2080,10 +2183,12 @@ dependencies = [
  "clap_complete",
  "clap_mangen",
  "crossterm",
+ "image",
  "libc",
  "nix 0.30.1",
  "owo-colors",
  "ratatui",
+ "ratatui-image",
  "serde",
  "serde_json",
  "sha2",
@@ -2108,7 +2213,7 @@ version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7285e83a80ce76f5e7bce79fa41f68d78ba62d1003cf27bf748ab24413808cf4"
 dependencies = [
- "thiserror",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2190,6 +2295,12 @@ dependencies = [
  "tempfile",
  "termcolor",
 ]
+
+[[package]]
+name = "vsimd"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 
 [[package]]
 name = "wait-timeout"
@@ -2310,10 +2421,74 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
+name = "windows"
+version = "0.58.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd04d41d93c4992d421894c18c8b43496aa748dd4c081bac0dc93eb0489272b6"
+dependencies = [
+ "windows-core",
+ "windows-targets",
+]
+
+[[package]]
+name = "windows-core"
+version = "0.58.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ba6d44ec8c2591c134257ce647b7ea6b20335bf6379a27dac5f1641fcf59f99"
+dependencies = [
+ "windows-implement",
+ "windows-interface",
+ "windows-result",
+ "windows-strings",
+ "windows-targets",
+]
+
+[[package]]
+name = "windows-implement"
+version = "0.58.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bbd5b46c938e506ecbce286b6628a02171d56153ba733b6c741fc627ec9579b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "windows-interface"
+version = "0.58.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "053c4c462dc91d3b1504c6fe5a726dd15e216ba718e84a0e46a88fbe5ded3515"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-result"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d1043d8214f791817bab27572aaa8af63732e11bf84aa21a45a78d6c317ae0e"
+dependencies = [
+ "windows-targets",
+]
+
+[[package]]
+name = "windows-strings"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cd9b125c486025df0eabcb585e62173c6c9eddcec5d117d3b6e8c30e2ee4d10"
+dependencies = [
+ "windows-result",
+ "windows-targets",
+]
 
 [[package]]
 name = "windows-sys"

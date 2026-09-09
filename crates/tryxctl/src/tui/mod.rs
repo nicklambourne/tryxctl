@@ -2,12 +2,14 @@
 //! ([`worker`]); the screen ([`app`]) only sends requests and draws events.
 
 mod app;
+mod preview;
 mod worker;
 
 use crate::exit::{self, CommandResult, Failure};
 use crate::legacy::{self, Backend};
 use app::App;
 use crossterm::event::{self, Event, KeyEventKind};
+use ratatui_image::picker::Picker;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -33,8 +35,11 @@ pub fn run(session: &legacy::Session) -> CommandResult {
     );
     request_tx.send(Request::Refresh).ok();
 
+    // Ask the terminal which graphics protocol it speaks (kitty, iTerm2,
+    // Sixel) before the alternate screen; half-blocks otherwise.
+    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::from_fontsize((8, 16)));
     let mut terminal = ratatui::init();
-    let mut app = App::new(request_tx.clone(), cancel);
+    let mut app = App::new(request_tx.clone(), cancel, picker);
     let result = loop {
         if let Err(error) = terminal.draw(|frame| app.render(frame)) {
             break Err(Failure::environment(format!("could not draw: {error}")));

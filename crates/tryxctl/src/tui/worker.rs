@@ -8,6 +8,8 @@ use crate::media::{self, TransformArgs, connect_adb, finish_stage};
 use crate::metrics::pc_info;
 use crate::ops::{self, Outcome, Pending, Record};
 use crate::state;
+use crate::tui::preview as pictures;
+use image::DynamicImage;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,8 +21,8 @@ use tryx_legacy::ScreenConfig;
 use tryx_legacy::adb::{Adb, DiskUsage, MediaFile};
 use tryx_legacy::commands::{parse_preset, preset_id};
 use tryx_media::check::Severity;
+use tryx_media::encode;
 use tryx_media::plan::Action;
-use tryx_media::{encode, preview};
 use tryx_monitor::{Monitor, Sample};
 
 pub enum Request {
@@ -42,7 +44,14 @@ pub enum Request {
         path: PathBuf,
         transform: Box<TransformArgs>,
     },
+    /// A picture of a file on the display, by name and size.
+    Thumbnail {
+        name: String,
+        size: u64,
+    },
+    /// A picture of a local file as the display would get it.
     Preview {
+        key: String,
         path: PathBuf,
         transform: Box<TransformArgs>,
     },
@@ -89,6 +98,14 @@ pub enum Event {
     },
     Readback(Box<Readback>),
     Operations(Vec<Record>),
+    Preview {
+        key: String,
+        image: Box<DynamicImage>,
+    },
+    PreviewFailed {
+        key: String,
+        reason: String,
+    },
     Log(String),
     Error(String),
 }
@@ -271,7 +288,31 @@ impl WorkerState {
             Request::Layout { screen, rotation } => self.layout(*screen, rotation),
             Request::Readback => self.readback(),
             Request::Analyse { path, transform } => self.analyse(&path, &transform),
-            Request::Preview { path, transform } => self.preview(&path, &transform),
+            Request::Thumbnail { name, size } => {
+                let key = format!("thumb:{name}");
+                match self.thumbnail(&name, size) {
+                    Ok(image) => self.emit(Event::Preview {
+                        key,
+                        image: Box::new(image),
+                    }),
+                    Err(reason) => self.emit(Event::PreviewFailed { key, reason }),
+                }
+                Ok(())
+            }
+            Request::Preview {
+                key,
+                path,
+                transform,
+            } => {
+                match self.preview(&path, &transform) {
+                    Ok(image) => self.emit(Event::Preview {
+                        key,
+                        image: Box::new(image),
+                    }),
+                    Err(reason) => self.emit(Event::PreviewFailed { key, reason }),
+                }
+                Ok(())
+            }
             Request::Upload { path, transform } => self.upload(&path, &transform, None),
             Request::Retry(id) => self.retry(&id),
             Request::ClearCache => {
@@ -507,34 +548,28 @@ impl WorkerState {
         Ok(())
     }
 
-    fn preview(&mut self, path: &Path, transform: &TransformArgs) -> Result<(), String> {
+    fn thumbnail(&mut self, name: &str, size: u64) -> Result<DynamicImage, String> {
+        if self.target.is_none() {
+            return Err("no preview on this firmware: media pull is not implemented".to_string());
+        }
+        let (ffmpeg, _) = encode::tools().map_err(|e| e.to_string())?;
+        let adb = self.adb()?;
+        pictures::device_thumbnail(&ffmpeg, adb, name, size)
+    }
+
+    fn preview(&mut self, path: &Path, transform: &TransformArgs) -> Result<DynamicImage, String> {
         let (ffmpeg, ffprobe) = encode::tools().map_err(|e| e.to_string())?;
         let options = transform.options(None).map_err(|f| f.message)?;
         let target = self.connection()?.media_target();
         let analysis = media::analyse(&ffprobe, path, &options, target);
         let kind = analysis.report.kind.ok_or("not a media file")?;
-        // A stable place: the temp dir vanishes with a nix shell.
-        let output = ops::cache_dir()
-            .and_then(|dir| dir.parent().map(|parent| parent.join("preview.png")))
-            .unwrap_or_else(|| std::env::temp_dir().join("tryxctl-preview.png"));
-        if let Some(parent) = output.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        preview::render_frame(
-            &ffmpeg,
-            path,
-            kind,
-            &options.transform,
-            target,
-            None,
-            &output,
-        )
-        .map_err(|e| e.to_string())?;
-        self.emit(Event::Log(format!(
-            "preview written to {}",
-            output.display()
-        )));
-        Ok(())
+        // A frame a little way in, where a clip has settled.
+        let at = analysis
+            .report
+            .source
+            .duration
+            .map(|duration| (duration / 3.0).min(2.0));
+        pictures::local_preview(&ffmpeg, path, kind, &options.transform, target, at)
     }
 
     fn retry(&mut self, id: &str) -> Result<(), String> {

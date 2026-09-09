@@ -81,6 +81,13 @@ what was last applied; a KANALI display is read back for real. Without a daemon 
 systemd user manager (log out fully, or `systemctl --user exit` and log in
 again) or the service will not see the new group.
 
+The interface previews media inline: a frame of the selected file on the
+display, and the file being uploaded as the display will get it. It uses
+kitty graphics, iTerm2 images, or Sixel when the terminal offers them, and
+coloured half-blocks otherwise. A file on the display whose index sits at
+the end of the container (no faststart) is pulled once to make its
+thumbnail, which is then cached.
+
 Every command takes `--json` for machine-readable output, `-q` for results
 and errors only, `--no-color`, and `-v` to dump the frames exchanged with
 the display. With several displays attached, `--tty`

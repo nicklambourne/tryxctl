@@ -26,6 +26,8 @@ tryx-media = { path = "../tryx-media" }
 tryx-monitor = { path = "../tryx-monitor" }
 viuer = { version = "0.9", features = ["print-file"] }
 which = { workspace = true }
+ratatui-image = "8"
+image = "0.25"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.30", features = ["user"] }

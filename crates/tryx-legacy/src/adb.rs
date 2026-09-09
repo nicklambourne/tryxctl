@@ -168,6 +168,14 @@ impl Adb {
         self.run(&["push", &local, &remote], true).map(drop)
     }
 
+    /// The first `bytes` of a file, streamed through `exec-out`; enough to
+    /// decode a frame when the container keeps its index at the front.
+    pub fn read_prefix(&self, remote_name: &str, bytes: u64) -> Result<Vec<u8>, LegacyError> {
+        let remote = self.remote_path(remote_name)?;
+        let count = bytes.to_string();
+        self.run_bytes(&["exec-out", "head", "-c", &count, "--", &remote])
+    }
+
     pub fn pull(&self, remote_name: &str, local: &Path) -> Result<(), LegacyError> {
         let remote = self.remote_path(remote_name)?;
         let local = local.to_string_lossy();
@@ -221,6 +229,25 @@ impl Adb {
             return Err(LegacyError::UnsafeMediaName(name.to_string()));
         }
         Ok(format!("{MEDIA_DIR}{name}"))
+    }
+
+    fn run_bytes(&self, args: &[&str]) -> Result<Vec<u8>, LegacyError> {
+        let mut command = Command::new(&self.program);
+        if let Some(serial) = &self.serial {
+            command.args(["-s", serial]);
+        }
+        command.args(args);
+        let output = command.output().map_err(|error| LegacyError::Adb {
+            args: args.join(" "),
+            message: error.to_string(),
+        })?;
+        if !output.status.success() {
+            return Err(LegacyError::Adb {
+                args: args.join(" "),
+                message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+        Ok(output.stdout)
     }
 
     fn run(&self, args: &[&str], device_scoped: bool) -> Result<String, LegacyError> {
