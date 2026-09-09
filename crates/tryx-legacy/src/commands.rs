@@ -220,15 +220,16 @@ pub fn media_delete(files: &[String]) -> Value {
     json!({"include": files})
 }
 
-/// Body of `POST fanLCDSet`: a fixed speed for the fan on the display block.
-/// The smart-mode curve is the vendor app's default, captured by
-/// AfroSamuraiX/panorama-manager (MIT); the firmware wants it present even in
-/// fixed mode.
-pub fn fan_lcd(percent: u8) -> Value {
+/// Body of `POST fanLCDSet`: `Some(percent)` fixes the speed of the fan on
+/// the display block, `None` hands it back to the firmware's smart curve.
+/// The curve is the vendor app's default, captured by
+/// AfroSamuraiX/panorama-manager (MIT); the firmware wants it present in
+/// both modes.
+pub fn fan_lcd(fixed: Option<u8>) -> Value {
     json!({
-        "mode": "Fixed Mode",
+        "mode": if fixed.is_some() { "Fixed Mode" } else { "Smart Mode" },
         "smartMode": [[0, 10], [28, 10], [48, 10], [61, 10], [75, 10], [77, 68], [79, 100], [100, 100]],
-        "fixedMode": percent.min(100),
+        "fixedMode": fixed.unwrap_or(0).min(100),
     })
 }
 
@@ -445,10 +446,13 @@ mod tests {
 
     #[test]
     fn fan_lcd_and_filter_and_sleep_bodies() {
-        let body = fan_lcd(140);
+        let body = fan_lcd(Some(140));
         assert_eq!(body["mode"], "Fixed Mode");
         assert_eq!(body["fixedMode"], 100);
         assert_eq!(body["smartMode"].as_array().unwrap().len(), 8);
+        let auto = fan_lcd(None);
+        assert_eq!(auto["mode"], "Smart Mode");
+        assert_eq!(auto["smartMode"].as_array().unwrap().len(), 8);
         let config = ScreenConfig {
             media: vec!["a.mp4".into()],
             settings: DisplaySettings {

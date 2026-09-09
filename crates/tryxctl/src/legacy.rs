@@ -308,7 +308,7 @@ impl Connection {
         }
     }
 
-    pub fn fan_lcd(&mut self, percent: u8) -> Result<(), Failure> {
+    pub fn fan_lcd(&mut self, percent: Option<u8>) -> Result<(), Failure> {
         match self {
             Connection::Daemon {
                 protocol: Protocol::Legacy,

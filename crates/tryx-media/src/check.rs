@@ -3,7 +3,7 @@
 use crate::probe::{Probe, Stream};
 use crate::target::{Format, Target};
 use crate::transform::{Mode, Transform};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Sources larger than this are refused before any work starts.
@@ -100,6 +100,45 @@ pub struct Options {
     /// Convert HDR sources instead of refusing them.
     pub tonemap: bool,
     pub name: Option<String>,
+    /// Keep only this part of a video.
+    pub trim: Option<Trim>,
+}
+
+/// A time range in seconds; `end` `None` runs to the end of the source.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Trim {
+    pub start: f64,
+    pub end: Option<f64>,
+}
+
+impl Trim {
+    /// Parses `A-B`, `A-`, or `-B` (seconds).
+    pub fn parse(text: &str) -> Option<Trim> {
+        let (start, end) = text.trim().split_once('-')?;
+        let start: f64 = if start.trim().is_empty() {
+            0.0
+        } else {
+            start.trim().parse().ok()?
+        };
+        let end: Option<f64> = if end.trim().is_empty() {
+            None
+        } else {
+            Some(end.trim().parse().ok()?)
+        };
+        if start < 0.0 || end.is_some_and(|end| end <= start) {
+            return None;
+        }
+        Some(Trim { start, end })
+    }
+
+    /// The output length for a source of `duration` seconds.
+    pub fn length(&self, duration: Option<f64>) -> Option<f64> {
+        match (self.end, duration) {
+            (Some(end), _) => Some(end - self.start),
+            (None, Some(duration)) => Some((duration - self.start).max(0.0)),
+            (None, None) => None,
+        }
+    }
 }
 
 impl Default for Options {
@@ -109,6 +148,7 @@ impl Default for Options {
             transform_explicit: false,
             tonemap: true,
             name: None,
+            trim: None,
         }
     }
 }
@@ -212,6 +252,42 @@ pub fn check(path: &Path, size: u64, probe: &Probe, target: Target, options: &Op
             &mut findings,
             &mut requirements,
         ),
+    }
+
+    if let Some(trim) = options.trim {
+        match kind {
+            Kind::Image => findings.push(fatal("TRYX-M-TRIM", "--trim applies to videos")),
+            Kind::Video | Kind::AnimatedImage => {
+                let too_long = source.duration.is_some_and(|duration| {
+                    trim.start >= duration || trim.end.is_some_and(|end| end > duration + 0.5)
+                });
+                if too_long {
+                    findings.push(fatal(
+                        "TRYX-M-TRIM",
+                        format!(
+                            "--trim {}-{} is outside the {:.1} s source",
+                            trim.start,
+                            trim.end.map(|e| e.to_string()).unwrap_or_default(),
+                            source.duration.unwrap_or(0.0)
+                        ),
+                    ));
+                } else {
+                    requirements.re_encode = true;
+                    requirements.remux = false;
+                    findings.push(auto(
+                        "TRYX-M-TRIM",
+                        format!(
+                            "keep {:.1} s to {}",
+                            trim.start,
+                            trim.end
+                                .map(|e| format!("{e:.1} s"))
+                                .unwrap_or_else(|| "the end".into())
+                        ),
+                        "re-encode the selected part",
+                    ));
+                }
+            }
+        }
     }
 
     if target.format != Format::Mp4 {
@@ -878,6 +954,41 @@ mod tests {
         assert_eq!(
             sanitize_stem("2025-12-09_19-48-54-100"),
             "2025-12-09_19-48-54-100"
+        );
+    }
+
+    #[test]
+    fn trim_ranges_parse_and_reject_nonsense() {
+        assert_eq!(
+            Trim::parse("2-7"),
+            Some(Trim {
+                start: 2.0,
+                end: Some(7.0)
+            })
+        );
+        assert_eq!(
+            Trim::parse("10-"),
+            Some(Trim {
+                start: 10.0,
+                end: None
+            })
+        );
+        assert_eq!(
+            Trim::parse("-30"),
+            Some(Trim {
+                start: 0.0,
+                end: Some(30.0)
+            })
+        );
+        assert_eq!(Trim::parse("7-2"), None);
+        assert_eq!(Trim::parse("abc"), None);
+        assert_eq!(
+            Trim {
+                start: 5.0,
+                end: None
+            }
+            .length(Some(12.0)),
+            Some(7.0)
         );
     }
 }

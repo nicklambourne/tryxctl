@@ -174,6 +174,22 @@ impl Adb {
         self.run(&["pull", &remote, &local], true).map(drop)
     }
 
+    /// Renames within the media directory; an atomic replace on the same
+    /// filesystem.
+    pub fn rename(&self, from_name: &str, to_name: &str) -> Result<(), LegacyError> {
+        let from = self.remote_path(from_name)?;
+        let to = self.remote_path(to_name)?;
+        let command = format!("mv -f -- {from} {to}");
+        let output = self.run(&["shell", &command], true)?;
+        if output.contains("mv:") || output.contains("No such file") {
+            return Err(LegacyError::Adb {
+                args: format!("shell {command}"),
+                message: output.trim().to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Removes a file; `Ok(false)` when it was already gone, which happens
     /// after the firmware acted on a `mediaDelete` command itself.
     pub fn remove(&self, remote_name: &str) -> Result<bool, LegacyError> {

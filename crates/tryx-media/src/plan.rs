@@ -19,6 +19,8 @@ pub enum Action {
 #[derive(Debug, Clone, Serialize)]
 pub struct Plan {
     pub target: Target,
+    /// Output length in seconds when known (after any trim).
+    pub duration: Option<f64>,
     pub action: Action,
     pub kind: Kind,
     pub input: PathBuf,
@@ -54,6 +56,18 @@ impl Plan {
             .iter()
             .map(|s| s.to_string())
             .collect();
+        let trim = options.trim.filter(|_| kind != Kind::Image);
+        let duration = match trim {
+            Some(trim) => trim.length(report.source.duration),
+            None => report.source.duration,
+        };
+        if let Some(trim) = trim {
+            args.extend(
+                ["-ss", &format!("{:.3}", trim.start)]
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+        }
         let loop_image = kind == Kind::Image && target.format != Format::Mp4;
         if loop_image {
             args.extend(
@@ -67,10 +81,20 @@ impl Plan {
         }
         args.push("-i".to_string());
         args.push(input.to_string_lossy().into_owned());
+        if let Some(trim) = trim
+            && let Some(end) = trim.end
+        {
+            args.extend(
+                ["-t", &format!("{:.3}", end - trim.start)]
+                    .iter()
+                    .map(|s| s.to_string()),
+            );
+        }
 
         let plan = match kind {
             Kind::Image if !report.requirements.re_encode => Plan {
                 target,
+                duration,
                 action: Action::Passthrough,
                 kind,
                 input,
@@ -100,6 +124,7 @@ impl Plan {
                 );
                 Plan {
                     target,
+                    duration,
                     action: Action::Encode,
                     kind,
                     input,
@@ -167,10 +192,7 @@ impl Plan {
                             .map(|s| s.to_string()),
                         );
                         (
-                            report
-                                .source
-                                .duration
-                                .map(|seconds| (seconds * LEGACY_VIDEO_BITRATE / 8.0) as u64),
+                            duration.map(|seconds| (seconds * LEGACY_VIDEO_BITRATE / 8.0) as u64),
                             format!(
                                 "re-encode to {}×{} H.264 MP4 at {} fps ({})",
                                 target.width, target.height, target.fps, options.transform.mode
@@ -277,9 +299,7 @@ impl Plan {
                             if loop_image {
                                 None
                             } else {
-                                report
-                                    .source
-                                    .duration
+                                duration
                                     .map(|seconds| (seconds * TURRIS_VIDEO_BITRATE / 8.0) as u64)
                             },
                             if loop_image {
@@ -298,6 +318,7 @@ impl Plan {
                 };
                 Plan {
                     target,
+                    duration,
                     action: Action::Encode,
                     kind,
                     input,
@@ -326,6 +347,7 @@ impl Plan {
                 );
                 Plan {
                     target,
+                    duration,
                     action: Action::Remux,
                     kind,
                     input,
@@ -338,6 +360,7 @@ impl Plan {
             }
             Kind::Image | Kind::Video | Kind::AnimatedImage => Plan {
                 target,
+                duration,
                 action: Action::Passthrough,
                 kind,
                 input,
@@ -607,5 +630,39 @@ mod tests {
         assert!(text.contains("-preset medium -crf 18"));
         assert!(text.contains("-level:v 4.0 -g 30 -keyint_min 30"));
         assert!(text.ends_with("-frames:v 1 -f h264"), "{text}");
+    }
+
+    #[test]
+    fn trim_seeks_the_input_and_bounds_the_output() {
+        let re_encode = Requirements {
+            re_encode: true,
+            ..Requirements::default()
+        };
+        let options = Options {
+            trim: Some(crate::check::Trim {
+                start: 2.5,
+                end: Some(7.0),
+            }),
+            ..Options::default()
+        };
+        let plan =
+            Plan::from_report(&report(Kind::Video, re_encode, Some(60.0)), &options).unwrap();
+        let text = plan.args.join(" ");
+        assert!(
+            text.starts_with("-hide_banner -nostdin -y -ss 2.500 -i /in/clip one.mkv -t 4.500 "),
+            "{text}"
+        );
+        assert_eq!(plan.duration, Some(4.5));
+        assert_eq!(plan.estimated_bytes, Some((4.5 * 13.5e6 / 8.0) as u64));
+        let open = Options {
+            trim: Some(crate::check::Trim {
+                start: 10.0,
+                end: None,
+            }),
+            ..Options::default()
+        };
+        let plan = Plan::from_report(&report(Kind::Video, re_encode, Some(60.0)), &open).unwrap();
+        assert!(!plan.args.join(" ").contains(" -t "));
+        assert_eq!(plan.duration, Some(50.0));
     }
 }

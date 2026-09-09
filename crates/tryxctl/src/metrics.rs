@@ -137,10 +137,22 @@ fn fmt(value: Option<f64>, unit: &str, decimals: usize) -> String {
     }
 }
 
-pub fn status(json: bool) -> CommandResult {
+pub fn status(json: bool, watch: Option<u64>) -> CommandResult {
     require_linux()?;
     let mut monitor = Monitor::new();
     let sample = warm_sample(&mut monitor);
+    if let Some(seconds) = watch {
+        let mut sample = sample;
+        loop {
+            if json {
+                println!("{}", serde_json::to_string(&sample)?);
+            } else {
+                println!("{}", summary_line(&sample));
+            }
+            thread::sleep(Duration::from_secs(seconds.max(1)));
+            sample = monitor.sample();
+        }
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&sample)?);
         return Ok(exit::ok());
@@ -535,18 +547,34 @@ pub fn fans(
     json: bool,
     session: &legacy::Session,
     watch: Option<u64>,
-    lcd_speed: Option<u8>,
+    lcd_speed: Option<String>,
 ) -> CommandResult {
     let mut connection = session.connect()?;
-    if let Some(percent) = lcd_speed {
-        connection.fan_lcd(percent)?;
+    if let Some(speed) = lcd_speed {
+        let fixed = if speed.eq_ignore_ascii_case("auto") {
+            None
+        } else {
+            Some(
+                speed
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|p| *p <= 100)
+                    .ok_or_else(|| {
+                        Failure::usage(format!("--lcd-speed {speed:?} is not 0 to 100 or auto"))
+                    })?,
+            )
+        };
+        connection.fan_lcd(fixed)?;
         let mut saved = state::load();
-        saved.fan_lcd_percent = Some(percent);
+        saved.fan_lcd_percent = fixed;
         if let Err(error) = state::save(&saved) {
             eprintln!("warning: could not save the display state: {error}");
         }
         if !json {
-            println!("LCD fan set to a fixed {percent}%");
+            match fixed {
+                Some(percent) => println!("LCD fan set to a fixed {percent}%"),
+                None => println!("LCD fan returned to the firmware's smart curve"),
+            }
         }
     }
     let has_pump = connection.info().ok().map(|info| info.has_pump());

@@ -9,6 +9,7 @@ mod kanali;
 mod legacy;
 mod media;
 mod metrics;
+mod ops;
 mod output;
 mod raw;
 mod show;
@@ -44,6 +45,14 @@ struct Cli {
     #[arg(long, global = true)]
     direct: bool,
 
+    /// Print results and errors only: no progress, no per-sample lines.
+    #[arg(short, long, global = true)]
+    quiet: bool,
+
+    /// Plain output without ANSI colours (NO_COLOR is honoured too).
+    #[arg(long, global = true)]
+    no_color: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -76,9 +85,9 @@ enum Command {
         /// Poll every N seconds until interrupted.
         #[arg(long, value_name = "SECONDS")]
         watch: Option<u64>,
-        /// Fixed speed for the display-block fan, 0 to 100.
-        #[arg(long, value_name = "PERCENT", value_parser = clap::value_parser!(u8).range(0..=100))]
-        lcd_speed: Option<u8>,
+        /// Display-block fan: a fixed speed 0 to 100, or auto for the firmware's curve.
+        #[arg(long, value_name = "PERCENT|auto")]
+        lcd_speed: Option<String>,
     },
     /// Run the daemon that owns the port: keepalive, metrics, and commands.
     Daemon {
@@ -87,9 +96,11 @@ enum Command {
         /// Seconds between metric pushes.
         #[arg(long, value_name = "SECONDS", default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=60))]
         interval: u64,
-        /// Log nothing but errors.
-        #[arg(short, long)]
-        quiet: bool,
+    },
+    /// Transfers journal: what was sent, what failed, what can be retried.
+    Op {
+        #[command(subcommand)]
+        action: OpAction,
     },
     /// Open the interactive interface.
     Tui,
@@ -164,7 +175,11 @@ enum DaemonAction {
 #[derive(Subcommand)]
 enum MetricsAction {
     /// Print what this host can measure.
-    Status,
+    Status {
+        /// Print a sample every N seconds until interrupted.
+        #[arg(long, value_name = "SECONDS")]
+        watch: Option<u64>,
+    },
     /// Configure the overlay: which metrics, where, and in what colour.
     Set {
         #[command(flatten)]
@@ -178,12 +193,26 @@ enum MetricsAction {
         /// Send one sample and exit.
         #[arg(long)]
         once: bool,
-        /// Do not print each sample.
-        #[arg(short, long)]
-        quiet: bool,
         /// Do not restore the saved screen before pushing.
         #[arg(long)]
         no_apply: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum OpAction {
+    /// List recent transfers.
+    Ls,
+    /// Run a failed transfer again, reusing its kept encode.
+    Retry {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Remove the kept encodes.
+    Clear {
+        /// Also empty the journal.
+        #[arg(long)]
+        journal: bool,
     },
 }
 
@@ -263,10 +292,34 @@ enum MediaAction {
         #[arg(required = true, value_name = "NAME")]
         names: Vec<String>,
     },
+    /// Copy a file off the display.
+    Export {
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Where to write it; defaults to the same name in the current directory.
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Overwrite an existing local file.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Put a new file under an existing name, without a gap where neither exists.
+    Replace {
+        #[arg(value_name = "NAME")]
+        name: String,
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        #[command(flatten)]
+        transform: media::TransformArgs,
+    },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if cli.no_color {
+        owo_colors::set_override(false);
+    }
+    output::set_quiet(cli.quiet);
     let session = legacy::Session {
         tty: cli.tty.clone(),
         device: cli.device.clone(),
@@ -283,12 +336,8 @@ fn main() -> ExitCode {
             DisplayAction::Reboot => display::reboot(cli.json, &session),
         },
         Command::Fans { watch, lcd_speed } => metrics::fans(cli.json, &session, watch, lcd_speed),
-        Command::Daemon {
-            action,
-            interval,
-            quiet,
-        } => match action {
-            None => daemon::run(&session, interval, quiet),
+        Command::Daemon { action, interval } => match action {
+            None => daemon::run(&session, interval, cli.quiet),
             Some(DaemonAction::Status) => daemon::status(cli.json),
             Some(DaemonAction::Install { interval }) => daemon::install(
                 cli.json,
@@ -332,8 +381,23 @@ fn main() -> ExitCode {
                 transform,
             } => media::preview(cli.json, &file, at, sheet, output, &transform),
             MediaAction::Rm { names } => media::rm(cli.json, &session, &names),
+            MediaAction::Export {
+                name,
+                output,
+                force,
+            } => media::export(cli.json, &session, &name, output, force),
+            MediaAction::Replace {
+                name,
+                file,
+                transform,
+            } => media::replace(cli.json, &session, &name, &file, &transform),
         },
         Command::Show { media, play } => show::run(cli.json, &session, &media, &play),
+        Command::Op { action } => match action {
+            OpAction::Ls => ops::ls(cli.json),
+            OpAction::Retry { id } => ops::retry(cli.json, &session, &id),
+            OpAction::Clear { journal } => ops::clear(cli.json, journal),
+        },
         Command::Tui => tui::run(&session),
         Command::Completions { shell } => {
             clap_complete::generate(
@@ -363,14 +427,13 @@ fn main() -> ExitCode {
             }
         }
         Command::Metrics { action } => match action {
-            MetricsAction::Status => metrics::status(cli.json),
+            MetricsAction::Status { watch } => metrics::status(cli.json, watch),
             MetricsAction::Set { args } => metrics::set(cli.json, &session, &args),
             MetricsAction::Push {
                 interval,
                 once,
-                quiet,
                 no_apply,
-            } => metrics::push(cli.json, &session, interval, once, quiet, !no_apply),
+            } => metrics::push(cli.json, &session, interval, once, cli.quiet, !no_apply),
         },
     };
     match result {

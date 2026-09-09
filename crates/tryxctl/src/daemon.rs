@@ -29,6 +29,9 @@ enum Owned {
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(3);
 /// Silent pushes in a row before the link is presumed dead.
 const SILENT_PUSH_LIMIT: u32 = 3;
+/// A wait that overran by this much means the host was asleep; the panel
+/// may have reset meanwhile, so the screen is applied again.
+const RESUME_GAP: Duration = Duration::from_secs(30);
 
 /// Whether an error means the link itself is gone, rather than the device
 /// declining one command.
@@ -142,7 +145,29 @@ pub fn run(session: &legacy::Session, interval: u64, quiet: bool) -> CommandResu
             Some(Owned::Kanali(_)) => next_push.min(next_keepalive),
             None => next_reconnect,
         };
-        match rx.recv_timeout(next.saturating_duration_since(Instant::now())) {
+        let wait = next.saturating_duration_since(Instant::now());
+        let before = SystemTime::now();
+        let received = rx.recv_timeout(wait);
+        // Measured before handling anything, so a long upload cannot look
+        // like a suspend. Monotonic time stops during suspend on Linux;
+        // the wall clock does not.
+        let overran = SystemTime::now()
+            .duration_since(before)
+            .unwrap_or_default()
+            .saturating_sub(wait);
+        if overran >= RESUME_GAP
+            && let Some(current) = owned.as_mut()
+        {
+            if !quiet {
+                println!(
+                    "the host was away for {} s; applying the screen again",
+                    overran.as_secs()
+                );
+            }
+            restore(current, &mut status, quiet);
+            next_push = Instant::now();
+        }
+        match received {
             Ok((request, reply_tx)) => {
                 let (reply, lost) = handle(&mut owned, &mut status, request);
                 let _ = reply_tx.send(reply);
@@ -242,7 +267,7 @@ fn restore(owned: &mut Owned, status: &mut DaemonStatus, quiet: bool) {
                 }
             }
             if let Some(percent) = saved.fan_lcd_percent
-                && let Err(error) = client.set_fan_lcd(percent)
+                && let Err(error) = client.set_fan_lcd(Some(percent))
             {
                 status.last_error = Some(format!("fan speed: {error}"));
             }

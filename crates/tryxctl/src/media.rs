@@ -1,12 +1,13 @@
 use crate::exit::{self, CommandResult, Failure};
 use crate::legacy::{self, Backend, Target as DeviceTarget};
+use crate::ops::{self, Outcome, Pending};
 use crate::output;
 use owo_colors::{OwoColorize, Stream};
 use serde_json::json;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use tryx_legacy::adb::{self, Adb, is_safe_media_name};
-use tryx_media::check::{self, Finding, Kind, Options, Report, Severity, Source};
+use tryx_media::check::{self, Finding, Kind, Options, Report, Severity, Source, Trim};
 use tryx_media::plan::Action;
 use tryx_media::target::{Format, KANALI_PANORAMA, KANALI_TURRIS, LEGACY_PANORAMA, Target};
 use tryx_media::transform::{Mode, Transform};
@@ -15,7 +16,7 @@ use tryx_media::{Plan, Probe, encode, mxhd, preview};
 /// Room to leave on the display's storage after an upload.
 const FREE_SPACE_MARGIN: u64 = 16 * 1024 * 1024;
 
-#[derive(clap::Args, Debug, Clone, Default)]
+#[derive(clap::Args, Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TransformArgs {
     /// How to map the source onto the display: fit, fill, crop, or stretch.
     #[arg(long, value_name = "MODE")]
@@ -39,6 +40,9 @@ pub struct TransformArgs {
     /// kanali-panorama, or kanali-turris (upload detects it).
     #[arg(long, value_name = "DISPLAY")]
     pub target: Option<String>,
+    /// Keep only part of a video, in seconds: A-B, A-, or -B.
+    #[arg(long, value_name = "A-B")]
+    pub trim: Option<String>,
 }
 
 impl TransformArgs {
@@ -101,11 +105,18 @@ impl TransformArgs {
         transform
             .validate()
             .map_err(|error| Failure::usage(error.to_string()))?;
+        let trim = match &self.trim {
+            Some(text) => Some(Trim::parse(text).ok_or_else(|| {
+                Failure::usage(format!("--trim {text:?} is not A-B, A-, or -B in seconds"))
+            })?),
+            None => None,
+        };
         Ok(Options {
             transform,
             transform_explicit: self.mode.is_some(),
             tonemap: !self.no_tonemap,
             name,
+            trim,
         })
     }
 }
@@ -304,6 +315,7 @@ fn run_plan(
     duration: Option<f64>,
     quiet: bool,
 ) -> Result<(), Failure> {
+    let quiet = quiet || output::quiet();
     let label = match plan.action {
         Action::Encode => "encoding",
         Action::Remux => "rewrapping",
@@ -403,14 +415,7 @@ pub fn convert(
     if !json {
         print_report(&analysis);
     }
-    run_plan(
-        &ffmpeg,
-        &ffprobe,
-        plan,
-        &output,
-        analysis.report.source.duration,
-        json,
-    )?;
+    run_plan(&ffmpeg, &ffprobe, plan, &output, plan.duration, json)?;
     let size = std::fs::metadata(&output)?.len();
     let sha256 = encode::sha256_file(&output)?;
     if json {
@@ -560,6 +565,117 @@ fn ls_kanali(json: bool, session: &legacy::Session) -> CommandResult {
     Ok(exit::ok())
 }
 
+/// A staged file on its way to the display, journalled, and kept for a
+/// retry when the transfer fails after the encode.
+struct Transfer {
+    record_id: String,
+    key: Option<String>,
+    staged: PathBuf,
+    /// The staged file is ours to delete (not the user's input).
+    owned: bool,
+}
+
+impl Transfer {
+    /// Runs the plan, or picks up the encode a failed attempt left behind.
+    fn stage(
+        ffmpeg: &Path,
+        ffprobe: &Path,
+        plan: &Plan,
+        json: bool,
+        pending: &Pending,
+        remote: &str,
+    ) -> Result<Transfer, Failure> {
+        let record = ops::begin(pending, remote, plan.target.id);
+        if plan.action == Action::Passthrough {
+            return Ok(Transfer {
+                record_id: record.id,
+                key: None,
+                staged: plan.input.clone(),
+                owned: false,
+            });
+        }
+        let key = ops::cache_key(&plan.input, &pending.transform, plan.target.id, remote)?;
+        if let Some(cached) = ops::cached(&key) {
+            if !json && !output::quiet() {
+                eprintln!("  reusing the encode kept from a previous attempt");
+            }
+            return Ok(Transfer {
+                record_id: record.id,
+                key: Some(key),
+                staged: cached,
+                owned: true,
+            });
+        }
+        let staged = std::env::temp_dir().join(format!(
+            "tryxctl-{}-{}-{}",
+            pending.kind,
+            std::process::id(),
+            remote
+        ));
+        if let Err(failure) = run_plan(ffmpeg, ffprobe, plan, &staged, plan.duration, json) {
+            let _ = std::fs::remove_file(&staged);
+            ops::finish(
+                &record.id,
+                Outcome::Failed,
+                Some(failure.message.clone()),
+                None,
+                None,
+                None,
+            );
+            return Err(failure);
+        }
+        Ok(Transfer {
+            record_id: record.id,
+            key: Some(key),
+            staged,
+            owned: true,
+        })
+    }
+
+    /// Records the outcome; keeps the encode when the transfer failed.
+    fn done(self, result: Result<(u64, String), Failure>) -> Result<(u64, String), Failure> {
+        match &result {
+            Ok((size, sha256)) => {
+                if self.owned {
+                    let _ = std::fs::remove_file(&self.staged);
+                }
+                if let Some(key) = &self.key {
+                    ops::discard(key);
+                }
+                ops::finish(
+                    &self.record_id,
+                    Outcome::Ok,
+                    None,
+                    None,
+                    Some(*size),
+                    Some(sha256.clone()),
+                );
+            }
+            Err(failure) => {
+                let cached = match (&self.key, self.owned) {
+                    (Some(key), true) => ops::keep(key, &self.staged).ok(),
+                    _ => None,
+                };
+                if cached.is_some() && !output::quiet() {
+                    eprintln!(
+                        "  the encode is kept; `tryxctl op retry {}` sends it without re-encoding",
+                        self.record_id
+                    );
+                }
+                ops::finish(
+                    &self.record_id,
+                    Outcome::Failed,
+                    Some(failure.message.clone()),
+                    cached,
+                    None,
+                    None,
+                );
+            }
+        }
+        result
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn upload(
     json: bool,
@@ -573,7 +689,15 @@ pub fn upload(
     transform: &TransformArgs,
 ) -> CommandResult {
     let (ffmpeg, ffprobe) = encode::tools()?;
-    let options = transform.options(name)?;
+    let options = transform.options(name.clone())?;
+    let pending = Pending {
+        kind: "upload",
+        source: file.to_path_buf(),
+        name,
+        transform: transform.clone(),
+        show,
+        replace,
+    };
     // The connected display decides the target; --target is for offline use.
     let backend = session.select_backend()?;
     let target = match &backend {
@@ -617,7 +741,9 @@ pub fn upload(
     let target = match backend {
         Backend::Legacy(target) => target,
         Backend::Kanali { .. } => {
-            return upload_kanali(json, session, &analysis, &ffmpeg, &ffprobe, show, replace);
+            return upload_kanali(
+                json, session, &analysis, &ffmpeg, &ffprobe, show, replace, &pending,
+            );
         }
     };
     // Fail on device problems before spending time on ffmpeg.
@@ -633,29 +759,9 @@ pub fn upload(
     if !json {
         print_report(&analysis);
     }
-    let staged: PathBuf = if plan.action == Action::Passthrough {
-        plan.input.clone()
-    } else {
-        let staged = std::env::temp_dir().join(format!(
-            "tryxctl-upload-{}-{}",
-            std::process::id(),
-            plan.name
-        ));
-        run_plan(
-            &ffmpeg,
-            &ffprobe,
-            plan,
-            &staged,
-            analysis.report.source.duration,
-            json,
-        )?;
-        staged
-    };
-    let result = push_and_show(session, &target, &adb, plan, &staged, show);
-    if staged != plan.input {
-        let _ = std::fs::remove_file(&staged);
-    }
-    let (size, sha256) = result?;
+    let transfer = Transfer::stage(&ffmpeg, &ffprobe, plan, json, &pending, &plan.name)?;
+    let result = push_and_show(session, &target, &adb, plan, &transfer.staged, show);
+    let (size, sha256) = transfer.done(result)?;
 
     if json {
         println!(
@@ -682,6 +788,7 @@ pub fn upload(
     Ok(exit::ok())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn upload_kanali(
     json: bool,
     session: &legacy::Session,
@@ -690,6 +797,7 @@ fn upload_kanali(
     ffprobe: &Path,
     show: bool,
     replace: bool,
+    pending: &Pending,
 ) -> CommandResult {
     let plan = analysis
         .plan
@@ -712,25 +820,11 @@ fn upload_kanali(
     if !json {
         print_report(analysis);
     }
-    let staged: PathBuf = if plan.action == Action::Passthrough {
-        plan.input.clone()
-    } else {
-        let staged =
-            std::env::temp_dir().join(format!("tryxctl-upload-{}-{}", std::process::id(), remote));
-        run_plan(
-            ffmpeg,
-            ffprobe,
-            plan,
-            &staged,
-            analysis.report.source.duration,
-            json,
-        )?;
-        staged
-    };
+    let transfer = Transfer::stage(ffmpeg, ffprobe, plan, json, pending, &remote)?;
     let result = (|| -> Result<(u64, String), Failure> {
-        let size = std::fs::metadata(&staged)?.len();
-        let sha256 = encode::sha256_file(&staged)?;
-        connection.upload(&staged, &remote, |sent, total| {
+        let size = std::fs::metadata(&transfer.staged)?.len();
+        let sha256 = encode::sha256_file(&transfer.staged)?;
+        connection.upload(&transfer.staged, &remote, |sent, total| {
             if !json && total > 0 {
                 eprint!(
                     "\r  uploading {:>3}%  {}   ",
@@ -744,10 +838,7 @@ fn upload_kanali(
         }
         Ok((size, sha256))
     })();
-    if staged != plan.input {
-        let _ = std::fs::remove_file(&staged);
-    }
-    let (size, sha256) = result?;
+    let (size, sha256) = transfer.done(result)?;
     if show {
         let mut saved = crate::state::load();
         saved.screen.media = vec![remote.clone()];
@@ -874,6 +965,210 @@ fn rm_kanali(json: bool, session: &legacy::Session, names: &[String]) -> Command
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({"removed": removed}))?
+        );
+    }
+    Ok(exit::ok())
+}
+
+/// `media export`: a copy of a file on the display, pulled over adb.
+pub fn export(
+    json: bool,
+    session: &legacy::Session,
+    name: &str,
+    output: Option<PathBuf>,
+    force: bool,
+) -> CommandResult {
+    if !is_safe_media_name(name) {
+        return Err(Failure::usage(format!("media name {name:?} is not safe")));
+    }
+    let target = match session.select_backend()? {
+        Backend::Legacy(target) => target,
+        Backend::Kanali { .. } => {
+            return Err(Failure::device(
+                "pulling media from a KANALI display is not implemented",
+            ));
+        }
+    };
+    let (adb, _) = connect_adb(&target)?;
+    let files = adb.list_media()?;
+    let entry = files
+        .iter()
+        .find(|file| file.name == name)
+        .ok_or_else(|| Failure::media(format!("{name} is not on the display")))?;
+    let path = output.unwrap_or_else(|| PathBuf::from(name));
+    if path.exists() && !force {
+        return Err(Failure::media(format!(
+            "{} exists; pass --force to overwrite it",
+            path.display()
+        )));
+    }
+    adb.pull(name, &path)?;
+    let size = std::fs::metadata(&path)?.len();
+    if size != entry.size {
+        let _ = std::fs::remove_file(&path);
+        return Err(Failure::device(format!(
+            "pulled {} of {} bytes; the copy was removed",
+            size, entry.size
+        )));
+    }
+    let sha256 = encode::sha256_file(&path)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "name": name,
+                "path": path,
+                "size": size,
+                "sha256": sha256,
+            }))?
+        );
+    } else {
+        println!(
+            "exported {name} to {} ({}, sha256 {}…)",
+            path.display(),
+            output::human_bytes(size),
+            &sha256[..12]
+        );
+    }
+    Ok(exit::ok())
+}
+
+/// `media replace`: a new file under an existing name. The prepared file is
+/// pushed under a temporary name, checked, and renamed over the old one,
+/// so an interruption leaves either the old file or the new one.
+pub fn replace(
+    json: bool,
+    session: &legacy::Session,
+    name: &str,
+    file: &Path,
+    transform: &TransformArgs,
+) -> CommandResult {
+    if !is_safe_media_name(name) {
+        return Err(Failure::usage(format!("media name {name:?} is not safe")));
+    }
+    let (ffmpeg, ffprobe) = encode::tools()?;
+    let backend = session.select_backend()?;
+    let (target, base_name) = match &backend {
+        Backend::Legacy(_) => (LEGACY_PANORAMA, name.to_string()),
+        Backend::Kanali { product, .. } => {
+            let suffix = product.media_name_suffix();
+            let base = name.strip_suffix(suffix).ok_or_else(|| {
+                Failure::usage(format!("names on this display end with {suffix}"))
+            })?;
+            (crate::kanali::media_target(*product), base.to_string())
+        }
+    };
+    let pending = Pending {
+        kind: "replace",
+        source: file.to_path_buf(),
+        name: Some(base_name.clone()),
+        transform: transform.clone(),
+        show: false,
+        replace: true,
+    };
+    let options = transform.options(Some(base_name))?;
+    let analysis = analyse(&ffprobe, file, &options, target);
+    if !analysis.report.acceptable(false) {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&analysis_json(&analysis))?
+            );
+        } else {
+            print_report(&analysis);
+        }
+        return Err(Failure::media(
+            "the file cannot be prepared for the display",
+        ));
+    }
+    let plan = analysis
+        .plan
+        .as_ref()
+        .expect("an acceptable report has a plan");
+    let target_device = match backend {
+        Backend::Legacy(target) => target,
+        Backend::Kanali { .. } => {
+            let connection = session.connect()?;
+            if connection.remote_name(&plan.name) != name {
+                return Err(Failure::usage(format!(
+                    "the prepared file would be called {}, not {name}; remove and upload instead",
+                    connection.remote_name(&plan.name)
+                )));
+            }
+            drop(connection);
+            return upload_kanali(
+                json, session, &analysis, &ffmpeg, &ffprobe, false, true, &pending,
+            );
+        }
+    };
+    if plan.name != name {
+        return Err(Failure::usage(format!(
+            "the prepared file would be called {}, not {name}; remove and upload instead",
+            plan.name
+        )));
+    }
+    let (adb, _) = connect_adb(&target_device)?;
+    if !adb.list_media()?.iter().any(|entry| entry.name == name) {
+        return Err(Failure::media(format!(
+            "{name} is not on the display; use `media upload`"
+        )));
+    }
+    if !json {
+        print_report(&analysis);
+    }
+    let transfer = Transfer::stage(&ffmpeg, &ffprobe, plan, json, &pending, name)?;
+    let temporary = format!("{name}.replacing-{}", std::process::id());
+    let result = (|| -> Result<(u64, String), Failure> {
+        let size = std::fs::metadata(&transfer.staged)?.len();
+        let sha256 = encode::sha256_file(&transfer.staged)?;
+        adb.push(&transfer.staged, &temporary)?;
+        let pushed = adb
+            .list_media()?
+            .into_iter()
+            .find(|entry| entry.name == temporary)
+            .map(|entry| entry.size);
+        if pushed != Some(size) {
+            let _ = adb.remove(&temporary);
+            return Err(Failure::device(format!(
+                "the pushed copy is {} bytes, expected {size}; nothing was replaced",
+                pushed
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "missing".into())
+            )));
+        }
+        adb.rename(&temporary, name)?;
+        Ok((size, sha256))
+    })();
+    let (size, sha256) = transfer.done(result)?;
+    // The firmware keeps playing the old frames until told again.
+    let mut saved = crate::state::load();
+    let showing = saved.screen.media.iter().any(|entry| entry == name);
+    if showing {
+        let mut connection = session.connect()?;
+        connection.apply(&mut saved)?;
+        let _ = crate::state::save(&saved);
+    }
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "name": name,
+                "size": size,
+                "sha256": sha256,
+                "action": plan.action,
+                "reloaded": showing,
+            }))?
+        );
+    } else {
+        println!(
+            "  replaced {name} ({}, sha256 {}…){}",
+            output::human_bytes(size),
+            &sha256[..12],
+            if showing {
+                "; the display reloaded it"
+            } else {
+                ""
+            }
         );
     }
     Ok(exit::ok())

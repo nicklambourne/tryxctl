@@ -1,0 +1,358 @@
+//! A journal of transfers, and the encodes kept from failed ones so a retry
+//! does not pay for ffmpeg twice.
+
+use crate::exit::{self, CommandResult, Failure};
+use crate::media::TransformArgs;
+use crate::{legacy, media, output};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const KEEP: usize = 50;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Outcome {
+    Running,
+    Ok,
+    Failed,
+}
+
+/// What a transfer needs to be run again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Pending {
+    pub kind: &'static str,
+    pub source: PathBuf,
+    /// The `--name` the user passed, if any.
+    pub name: Option<String>,
+    pub transform: TransformArgs,
+    pub show: bool,
+    pub replace: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Record {
+    pub id: String,
+    pub kind: String,
+    pub started_unix: i64,
+    pub finished_unix: Option<i64>,
+    pub source: PathBuf,
+    pub name: Option<String>,
+    /// The name on the display.
+    pub remote: String,
+    pub target: String,
+    pub transform: TransformArgs,
+    pub show: bool,
+    pub replace: bool,
+    pub outcome: Outcome,
+    #[serde(default)]
+    pub error: Option<String>,
+    /// The encode kept for a retry.
+    #[serde(default)]
+    pub cached: Option<PathBuf>,
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn xdg(var: &str, fallback: &str) -> Option<PathBuf> {
+    std::env::var_os(var)
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(fallback)))
+}
+
+pub fn journal_path() -> Option<PathBuf> {
+    xdg("XDG_STATE_HOME", ".local/state").map(|base| base.join("tryxctl/operations.json"))
+}
+
+pub fn cache_dir() -> Option<PathBuf> {
+    xdg("XDG_CACHE_HOME", ".cache").map(|base| base.join("tryxctl/encodes"))
+}
+
+pub fn load() -> Vec<Record> {
+    journal_path()
+        .and_then(|path| std::fs::read(path).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn save(records: &[Record]) -> std::io::Result<()> {
+    let Some(path) = journal_path() else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, serde_json::to_vec_pretty(records)?)?;
+    std::fs::rename(&temp, path)
+}
+
+/// Journals the start of a transfer.
+pub fn begin(pending: &Pending, remote: &str, target: &str) -> Record {
+    let started = now_unix();
+    let record = Record {
+        id: format!(
+            "{:x}",
+            (started as u64) << 16 | u64::from(std::process::id() & 0xffff)
+        )[..12]
+            .to_string(),
+        kind: pending.kind.to_string(),
+        started_unix: started,
+        finished_unix: None,
+        source: pending.source.clone(),
+        name: pending.name.clone(),
+        remote: remote.to_string(),
+        target: target.to_string(),
+        transform: pending.transform.clone(),
+        show: pending.show,
+        replace: pending.replace,
+        outcome: Outcome::Running,
+        error: None,
+        cached: None,
+        size: None,
+        sha256: None,
+    };
+    let mut records = load();
+    records.push(record.clone());
+    if records.len() > KEEP {
+        let drop = records.len() - KEEP;
+        for old in records.drain(..drop) {
+            if let Some(cached) = old.cached {
+                let _ = std::fs::remove_file(cached);
+            }
+        }
+    }
+    let _ = save(&records);
+    record
+}
+
+pub fn finish(
+    id: &str,
+    outcome: Outcome,
+    error: Option<String>,
+    cached: Option<PathBuf>,
+    size: Option<u64>,
+    sha256: Option<String>,
+) {
+    let mut records = load();
+    if let Some(record) = records.iter_mut().find(|record| record.id == id) {
+        record.finished_unix = Some(now_unix());
+        record.outcome = outcome;
+        record.error = error;
+        record.cached = cached;
+        record.size = size;
+        record.sha256 = sha256;
+    }
+    let _ = save(&records);
+}
+
+/// A key for the encode of `source` with these options: the same source
+/// (path, size, modification time) prepared the same way for the same
+/// display name.
+pub fn cache_key(
+    source: &Path,
+    transform: &TransformArgs,
+    target: &str,
+    remote: &str,
+) -> Result<String, Failure> {
+    let metadata = std::fs::metadata(source)?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let canonical = std::fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    hasher.update(format!("|{}|{modified}|{target}|{remote}|", metadata.len()).as_bytes());
+    hasher.update(
+        serde_json::to_string(transform)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    let digest = hasher.finalize();
+    Ok(digest
+        .iter()
+        .take(12)
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// The kept encode for `key`, when there is one.
+pub fn cached(key: &str) -> Option<PathBuf> {
+    let path = cache_dir()?.join(key);
+    path.is_file().then_some(path)
+}
+
+/// Moves a finished encode into the cache under `key`.
+pub fn keep(key: &str, staged: &Path) -> std::io::Result<PathBuf> {
+    let dir = cache_dir().ok_or_else(|| std::io::Error::other("no cache directory"))?;
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(key);
+    if path != staged && std::fs::rename(staged, &path).is_err() {
+        std::fs::copy(staged, &path)?;
+        let _ = std::fs::remove_file(staged);
+    }
+    Ok(path)
+}
+
+pub fn discard(key: &str) {
+    if let Some(path) = cached(key) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn age(seconds: i64) -> String {
+    match seconds {
+        s if s < 60 => format!("{s} s ago"),
+        s if s < 3600 => format!("{} min ago", s / 60),
+        s if s < 86_400 => format!("{} h ago", s / 3600),
+        s => format!("{} d ago", s / 86_400),
+    }
+}
+
+/// `op ls`: the journal, newest last.
+pub fn ls(json: bool) -> CommandResult {
+    let records = load();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&records)?);
+        return Ok(exit::ok());
+    }
+    if records.is_empty() {
+        println!("No transfers recorded.");
+        return Ok(exit::ok());
+    }
+    let now = now_unix();
+    let rows: Vec<Vec<String>> = records
+        .iter()
+        .map(|record| {
+            let detail = match record.outcome {
+                Outcome::Ok => record.size.map(output::human_bytes).unwrap_or_default(),
+                Outcome::Failed => record.error.clone().unwrap_or_default(),
+                Outcome::Running => "in progress".to_string(),
+            };
+            vec![
+                record.id.clone(),
+                age(now - record.started_unix),
+                record.kind.clone(),
+                record.remote.clone(),
+                match record.outcome {
+                    Outcome::Ok => "ok",
+                    Outcome::Failed => "failed",
+                    Outcome::Running => "running",
+                }
+                .to_string(),
+                if record.cached.as_ref().is_some_and(|p| p.is_file()) {
+                    "kept".to_string()
+                } else {
+                    String::new()
+                },
+                detail,
+            ]
+        })
+        .collect();
+    print!(
+        "{}",
+        output::table(
+            &["ID", "WHEN", "KIND", "NAME", "OUTCOME", "ENCODE", "DETAIL"],
+            &rows
+        )
+    );
+    Ok(exit::ok())
+}
+
+/// `op retry ID`: runs a failed transfer again with the same options; the
+/// kept encode is picked up through the cache key.
+pub fn retry(json: bool, session: &legacy::Session, id: &str) -> CommandResult {
+    let record = load()
+        .into_iter()
+        .find(|record| record.id == id || record.id.starts_with(id))
+        .ok_or_else(|| Failure::usage(format!("no transfer {id}; see `op ls`")))?;
+    if record.outcome != Outcome::Failed {
+        return Err(Failure::usage(format!(
+            "transfer {} is {}; only failed ones can be retried",
+            record.id,
+            match record.outcome {
+                Outcome::Ok => "complete",
+                _ => "still running",
+            }
+        )));
+    }
+    if !json {
+        println!(
+            "retrying {} of {} as {}",
+            record.kind,
+            record.source.display(),
+            record.remote
+        );
+    }
+    match record.kind.as_str() {
+        "replace" => media::replace(
+            json,
+            session,
+            &record.remote,
+            &record.source,
+            &record.transform,
+        ),
+        _ => media::upload(
+            json,
+            session,
+            &record.source,
+            record.name.clone(),
+            record.show,
+            record.replace,
+            false,
+            false,
+            &record.transform,
+        ),
+    }
+}
+
+/// `op clear`: drops the kept encodes, and the journal with `--journal`.
+pub fn clear(json: bool, journal: bool) -> CommandResult {
+    let mut removed = 0u64;
+    if let Some(dir) = cache_dir()
+        && let Ok(entries) = std::fs::read_dir(&dir)
+    {
+        for entry in entries.flatten() {
+            if std::fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    let mut records = load();
+    for record in &mut records {
+        record.cached = None;
+    }
+    if journal {
+        records.clear();
+    }
+    let _ = save(&records);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &json!({"removed_encodes": removed, "journal_cleared": journal})
+            )?
+        );
+    } else {
+        println!(
+            "removed {removed} kept encode(s){}",
+            if journal { " and the journal" } else { "" }
+        );
+    }
+    Ok(exit::ok())
+}

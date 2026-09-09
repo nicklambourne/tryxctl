@@ -245,10 +245,11 @@ impl Client {
         }
     }
 
-    /// `POST fanLCDSet`: fixed speed for the display-block fan, 0 to 100.
-    pub fn set_fan_lcd(&mut self, percent: u8) -> Result<Response, LegacyError> {
+    /// `POST fanLCDSet`: a fixed speed for the display-block fan, 0 to 100,
+    /// or `None` for the firmware's own curve.
+    pub fn set_fan_lcd(&mut self, fixed: Option<u8>) -> Result<Response, LegacyError> {
         self.link
-            .request("fanLCDSet", &commands::fan_lcd(percent).to_string())
+            .request("fanLCDSet", &commands::fan_lcd(fixed).to_string())
     }
 }
 

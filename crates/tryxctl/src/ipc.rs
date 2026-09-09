@@ -29,8 +29,9 @@ pub enum Request {
     DeleteMedia {
         names: Vec<String>,
     },
+    /// `None` returns the display-block fan to the firmware's curve.
     FanLcd {
-        percent: u8,
+        percent: Option<u8>,
     },
     Reboot,
     Raw {

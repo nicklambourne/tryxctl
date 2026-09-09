@@ -344,20 +344,14 @@ impl WorkerState {
                 std::env::temp_dir().join(format!("tryxctl-tui-{}-{}", std::process::id(), name));
             let events = self.events.clone();
             let progress_name = name.clone();
-            encode::run(
-                &ffmpeg,
-                &plan,
-                &staged,
-                report.source.duration,
-                |progress| {
-                    if let Some(fraction) = progress.fraction {
-                        let _ = events.send(Event::UploadProgress {
-                            name: progress_name.clone(),
-                            fraction,
-                        });
-                    }
-                },
-            )
+            encode::run(&ffmpeg, &plan, &staged, plan.duration, |progress| {
+                if let Some(fraction) = progress.fraction {
+                    let _ = events.send(Event::UploadProgress {
+                        name: progress_name.clone(),
+                        fraction,
+                    });
+                }
+            })
             .map_err(|e| e.to_string())?;
             finish_stage(&ffprobe, &plan, &staged).map_err(|f| f.message)?;
             staged
