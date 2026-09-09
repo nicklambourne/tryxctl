@@ -9,7 +9,7 @@ use crate::exit::{self, CommandResult, Failure};
 use crate::legacy::{self, Backend};
 use app::App;
 use crossterm::event::{self, Event, KeyEventKind};
-use ratatui_image::picker::Picker;
+use ratatui_image::picker::{Picker, ProtocolType};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -35,9 +35,7 @@ pub fn run(session: &legacy::Session) -> CommandResult {
     );
     request_tx.send(Request::Refresh).ok();
 
-    // Ask the terminal which graphics protocol it speaks (kitty, iTerm2,
-    // Sixel) before the alternate screen; half-blocks otherwise.
-    let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::from_fontsize((8, 16)));
+    let picker = graphics();
     let mut terminal = ratatui::init();
     let mut app = App::new(request_tx.clone(), cancel, picker);
     let result = loop {
@@ -65,4 +63,46 @@ pub fn run(session: &legacy::Session) -> CommandResult {
     request_tx.send(Request::Quit).ok();
     worker.join();
     result.map(|()| exit::ok())
+}
+
+/// How pictures are drawn. `TRYXCTL_GRAPHICS` (kitty, iterm2, sixel,
+/// halfblocks) settles it outright. Inside tmux nothing is queried: the
+/// pane only forwards graphics when passthrough is on, so the answer would
+/// not be trusted anyway. Elsewhere the terminal is asked, before the
+/// alternate screen, and half-blocks are the fallback. The query must not
+/// run where the terminal may never answer: its reader thread would then
+/// keep stdin and swallow every key.
+fn graphics() -> Picker {
+    let forced = std::env::var("TRYXCTL_GRAPHICS").ok();
+    let protocol = forced
+        .as_deref()
+        .map(|name| match name.to_ascii_lowercase().as_str() {
+            "kitty" => ProtocolType::Kitty,
+            "iterm2" | "iterm" => ProtocolType::Iterm2,
+            "sixel" => ProtocolType::Sixel,
+            _ => ProtocolType::Halfblocks,
+        });
+    let mut picker = if protocol.is_none() && std::env::var_os("TMUX").is_none() {
+        Picker::from_query_stdio().unwrap_or_else(|_| Picker::from_fontsize(cell_size()))
+    } else {
+        Picker::from_fontsize(cell_size())
+    };
+    if let Some(protocol) = protocol {
+        picker.set_protocol_type(protocol);
+    }
+    picker
+}
+
+/// The terminal cell in pixels from the window size, or a 1:2 guess.
+fn cell_size() -> (u16, u16) {
+    #[cfg(unix)]
+    {
+        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        // SAFETY: TIOCGWINSZ fills a winsize struct for a terminal fd.
+        let ok = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) } == 0;
+        if ok && size.ws_col > 0 && size.ws_row > 0 && size.ws_xpixel > 0 && size.ws_ypixel > 0 {
+            return (size.ws_xpixel / size.ws_col, size.ws_ypixel / size.ws_row);
+        }
+    }
+    (8, 16)
 }
