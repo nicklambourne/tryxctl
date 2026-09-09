@@ -3,31 +3,68 @@
 //! interleave on the link.
 
 use crate::ipc::{self, Request as IpcRequest};
-use crate::legacy::{Connection, Info, Session, Target};
-use crate::media::{connect_adb, finish_stage};
+use crate::legacy::{Connection, Info, Readback, Session, Target};
+use crate::media::{self, TransformArgs, connect_adb, finish_stage};
 use crate::metrics::pc_info;
+use crate::ops::{self, Outcome, Pending, Record};
 use crate::state;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tryx_legacy::FanStatus;
 use tryx_legacy::ScreenConfig;
 use tryx_legacy::adb::{Adb, DiskUsage, MediaFile};
-use tryx_media::check::{Options, Severity};
+use tryx_legacy::commands::{parse_preset, preset_id};
+use tryx_media::check::Severity;
 use tryx_media::plan::Action;
-use tryx_media::{Plan, Probe, encode};
+use tryx_media::{encode, preview};
 use tryx_monitor::{Monitor, Sample};
 
 pub enum Request {
     Refresh,
-    Show { media: Vec<String>, play: String },
+    Show {
+        media: Vec<String>,
+        play: String,
+    },
     Delete(String),
+    Export(String),
     Brightness(u8),
     Overlay(Box<ScreenConfig>),
-    Upload(PathBuf),
+    Layout {
+        screen: Box<ScreenConfig>,
+        rotation: Option<u16>,
+    },
+    Readback,
+    Analyse {
+        path: PathBuf,
+        transform: Box<TransformArgs>,
+    },
+    Preview {
+        path: PathBuf,
+        transform: Box<TransformArgs>,
+    },
+    Upload {
+        path: PathBuf,
+        transform: Box<TransformArgs>,
+    },
+    Retry(String),
+    ClearCache,
     PushMetrics(bool),
     Quit,
+}
+
+/// One connected display, as `tryxctl devices` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceRow {
+    pub id: String,
+    pub product: String,
+    pub usb_id: String,
+    pub serial: String,
+    pub access: String,
+    pub protocol: String,
 }
 
 pub enum Event {
@@ -38,12 +75,20 @@ pub enum Event {
         files: Vec<MediaFile>,
         storage: Option<DiskUsage>,
     },
+    Devices(Vec<DeviceRow>),
     Sample(Sample),
     Pushing(bool),
     UploadProgress {
         name: String,
         fraction: f64,
     },
+    Analysis {
+        path: PathBuf,
+        lines: Vec<String>,
+        acceptable: bool,
+    },
+    Readback(Box<Readback>),
+    Operations(Vec<Record>),
     Log(String),
     Error(String),
 }
@@ -58,11 +103,12 @@ impl Worker {
     pub fn spawn(
         session: Session,
         target: Option<Target>,
+        cancel: Arc<AtomicBool>,
         requests: Receiver<Request>,
         events: Sender<Event>,
     ) -> Worker {
         let handle = std::thread::spawn(move || {
-            let mut state = WorkerState::new(session, target, events);
+            let mut state = WorkerState::new(session, target, cancel, events);
             state.run(requests);
         });
         Worker { handle }
@@ -77,6 +123,7 @@ struct WorkerState {
     session: Session,
     /// The legacy serial target; `None` on KANALI displays.
     target: Option<Target>,
+    cancel: Arc<AtomicBool>,
     events: Sender<Event>,
     connection: Option<Connection>,
     adb: Option<Adb>,
@@ -86,10 +133,16 @@ struct WorkerState {
 }
 
 impl WorkerState {
-    fn new(session: Session, target: Option<Target>, events: Sender<Event>) -> Self {
+    fn new(
+        session: Session,
+        target: Option<Target>,
+        cancel: Arc<AtomicBool>,
+        events: Sender<Event>,
+    ) -> Self {
         WorkerState {
             session,
             target,
+            cancel,
             events,
             connection: None,
             adb: None,
@@ -205,12 +258,28 @@ impl WorkerState {
 
     fn handle(&mut self, request: Request) {
         let outcome = match request {
-            Request::Refresh => self.refresh(),
+            Request::Refresh => self.refresh().and_then(|()| {
+                self.devices();
+                self.operations();
+                self.readback()
+            }),
             Request::Show { media, play } => self.show(media, play),
             Request::Delete(name) => self.delete(&name),
+            Request::Export(name) => self.export(&name),
             Request::Brightness(value) => self.brightness(value),
             Request::Overlay(screen) => self.overlay(*screen),
-            Request::Upload(path) => self.upload(&path),
+            Request::Layout { screen, rotation } => self.layout(*screen, rotation),
+            Request::Readback => self.readback(),
+            Request::Analyse { path, transform } => self.analyse(&path, &transform),
+            Request::Preview { path, transform } => self.preview(&path, &transform),
+            Request::Upload { path, transform } => self.upload(&path, &transform, None),
+            Request::Retry(id) => self.retry(&id),
+            Request::ClearCache => {
+                let _ = crate::ops::clear(true, false);
+                self.operations();
+                self.emit(Event::Log("kept encodes removed".to_string()));
+                Ok(())
+            }
             Request::PushMetrics(enabled) => match &self.connection {
                 Some(Connection::Daemon { .. }) => {
                     self.emit(Event::Pushing(true));
@@ -267,16 +336,86 @@ impl WorkerState {
         Ok(())
     }
 
+    fn devices(&mut self) {
+        let rows = match tryx_device::discover() {
+            Ok(discovery) => {
+                let mut rows: Vec<DeviceRow> = discovery
+                    .printer_devices
+                    .iter()
+                    .map(|device| DeviceRow {
+                        id: device.id.clone(),
+                        product: device
+                            .product
+                            .map(|p| p.name().to_string())
+                            .unwrap_or_else(|| "unknown TRYX product".into()),
+                        usb_id: device.usb_id.clone(),
+                        serial: device.serial.clone().unwrap_or_else(|| "-".into()),
+                        access: device.access.to_string(),
+                        protocol: "KANALI".to_string(),
+                    })
+                    .collect();
+                rows.extend(discovery.legacy_devices.iter().map(|device| {
+                    DeviceRow {
+                        id: device.id.clone(),
+                        product: device.product_string.clone(),
+                        usb_id: device.usb_id.clone(),
+                        serial: device.serial.clone().unwrap_or_else(|| "-".into()),
+                        access: device
+                            .tty_access
+                            .as_ref()
+                            .map(ToString::to_string)
+                            .unwrap_or_else(|| "-".into()),
+                        protocol: format!(
+                            "legacy ({})",
+                            device.tty.clone().unwrap_or_else(|| "no port".into())
+                        ),
+                    }
+                }));
+                rows
+            }
+            Err(error) => {
+                self.emit(Event::Error(format!("discovery: {error}")));
+                Vec::new()
+            }
+        };
+        self.emit(Event::Devices(rows));
+    }
+
+    fn operations(&mut self) {
+        self.emit(Event::Operations(ops::load()));
+    }
+
+    fn readback(&mut self) -> Result<(), String> {
+        let readback = self.connection()?.readback().map_err(|f| f.message)?;
+        self.emit(Event::Readback(Box::new(readback)));
+        Ok(())
+    }
+
     fn show(&mut self, media: Vec<String>, play: String) -> Result<(), String> {
         let mut saved = state::load();
-        saved.screen.media = media.clone();
+        let preset = match media.as_slice() {
+            [only] => parse_preset(only).and_then(preset_id),
+            _ => None,
+        };
+        match preset {
+            Some(id) => saved.screen.preset_id = id.to_string(),
+            None => {
+                saved.screen.preset_id.clear();
+                saved.screen.media = media.clone();
+            }
+        }
         saved.screen.play_mode = play.clone();
         self.connection()?
             .apply(&mut saved)
             .map_err(|f| f.message)?;
         let _ = state::save(&saved);
-        self.emit(Event::Log(format!("showing {} ({play})", media.join(", "))));
-        Ok(())
+        self.emit(Event::Log(format!(
+            "showing {} ({play})",
+            preset
+                .map(str::to_string)
+                .unwrap_or_else(|| media.join(", "))
+        )));
+        self.readback()
     }
 
     fn delete(&mut self, name: &str) -> Result<(), String> {
@@ -288,6 +427,21 @@ impl WorkerState {
         }
         self.emit(Event::Log(format!("removed {name}")));
         self.refresh()
+    }
+
+    fn export(&mut self, name: &str) -> Result<(), String> {
+        if self.target.is_none() {
+            return Err("pulling media from a KANALI display is not implemented".to_string());
+        }
+        let path = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(name);
+        if path.exists() {
+            return Err(format!("{} exists already", path.display()));
+        }
+        self.adb()?.pull(name, &path).map_err(|e| e.to_string())?;
+        self.emit(Event::Log(format!("exported {name} to {}", path.display())));
+        Ok(())
     }
 
     fn brightness(&mut self, value: u8) -> Result<(), String> {
@@ -316,15 +470,95 @@ impl WorkerState {
         Ok(())
     }
 
-    fn upload(&mut self, path: &PathBuf) -> Result<(), String> {
-        let (ffmpeg, ffprobe) = encode::tools().map_err(|e| e.to_string())?;
-        let metadata = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let probe = Probe::read(&ffprobe, path).map_err(|e| e.to_string())?;
-        let options = Options::default();
+    fn layout(&mut self, screen: ScreenConfig, rotation: Option<u16>) -> Result<(), String> {
+        let mut saved = state::load();
+        saved.screen = screen;
+        self.connection()?
+            .apply(&mut saved)
+            .map_err(|f| f.message)?;
+        if let Some(degrees) = rotation {
+            self.connection()?.rotate(degrees).map_err(|f| f.message)?;
+            saved.rotation = Some(degrees);
+        }
+        let _ = state::save(&saved);
+        self.emit(Event::Log(format!(
+            "layout: {}, waterfall {}, rotation {}°",
+            saved.screen.screen_mode.to_lowercase(),
+            if saved.screen.waterfall_mode {
+                "on"
+            } else {
+                "off"
+            },
+            saved.rotation.unwrap_or(0)
+        )));
+        self.readback()
+    }
+
+    fn analyse(&mut self, path: &Path, transform: &TransformArgs) -> Result<(), String> {
+        let (_, ffprobe) = encode::tools().map_err(|e| e.to_string())?;
+        let options = transform.options(None).map_err(|f| f.message)?;
         let target = self.connection()?.media_target();
-        let report = tryx_media::check::check(path, metadata.len(), &probe, target, &options);
-        if !report.acceptable(false) {
-            let reason = report
+        let analysis = media::analyse(&ffprobe, path, &options, target);
+        self.emit(Event::Analysis {
+            path: path.to_path_buf(),
+            lines: media::finding_lines(&analysis),
+            acceptable: analysis.report.acceptable(false),
+        });
+        Ok(())
+    }
+
+    fn preview(&mut self, path: &Path, transform: &TransformArgs) -> Result<(), String> {
+        let (ffmpeg, ffprobe) = encode::tools().map_err(|e| e.to_string())?;
+        let options = transform.options(None).map_err(|f| f.message)?;
+        let target = self.connection()?.media_target();
+        let analysis = media::analyse(&ffprobe, path, &options, target);
+        let kind = analysis.report.kind.ok_or("not a media file")?;
+        let output =
+            std::env::temp_dir().join(format!("tryxctl-preview-{}.png", std::process::id()));
+        preview::render_frame(
+            &ffmpeg,
+            path,
+            kind,
+            &options.transform,
+            target,
+            None,
+            &output,
+        )
+        .map_err(|e| e.to_string())?;
+        self.emit(Event::Log(format!(
+            "preview written to {}",
+            output.display()
+        )));
+        Ok(())
+    }
+
+    fn retry(&mut self, id: &str) -> Result<(), String> {
+        let record = ops::load()
+            .into_iter()
+            .find(|record| record.id == id)
+            .ok_or_else(|| format!("no transfer {id}"))?;
+        if record.outcome != Outcome::Failed {
+            return Err("only failed transfers can be retried".to_string());
+        }
+        if record.kind != "upload" {
+            return Err(format!("retry a {} from the command line", record.kind));
+        }
+        self.upload(&record.source, &record.transform, record.name.clone())
+    }
+
+    fn upload(
+        &mut self,
+        path: &Path,
+        transform: &TransformArgs,
+        name: Option<String>,
+    ) -> Result<(), String> {
+        let (ffmpeg, ffprobe) = encode::tools().map_err(|e| e.to_string())?;
+        let options = transform.options(name.clone()).map_err(|f| f.message)?;
+        let target = self.connection()?.media_target();
+        let analysis = media::analyse(&ffprobe, path, &options, target);
+        if !analysis.report.acceptable(false) {
+            let reason = analysis
+                .report
                 .findings
                 .iter()
                 .find(|f| f.severity == Severity::Fatal)
@@ -332,41 +566,92 @@ impl WorkerState {
                 .unwrap_or_else(|| "rejected".to_string());
             return Err(format!("{}: {reason}", path.display()));
         }
-        let plan = Plan::from_report(&report, &options).ok_or("nothing to upload")?;
-        let name = self.connection()?.remote_name(&plan.name);
-        if self.list()?.0.iter().any(|f| f.name == name) {
-            return Err(format!("{name} already exists on the display"));
+        let plan = analysis.plan.ok_or("nothing to upload")?;
+        let remote = self.connection()?.remote_name(&plan.name);
+        if self.list()?.0.iter().any(|f| f.name == remote) {
+            return Err(format!("{remote} already exists on the display"));
         }
-        let staged = if plan.action == Action::Passthrough {
-            plan.input.clone()
+        let pending = Pending {
+            kind: "upload",
+            source: path.to_path_buf(),
+            name,
+            transform: transform.clone(),
+            show: false,
+            replace: false,
+        };
+        let record = ops::begin(&pending, &remote, plan.target.id);
+        let fail = |id: &str, message: String, cached: Option<PathBuf>| {
+            ops::finish(
+                id,
+                Outcome::Failed,
+                Some(message.clone()),
+                cached,
+                None,
+                None,
+            );
+            message
+        };
+        let key = if plan.action == Action::Passthrough {
+            None
+        } else {
+            Some(
+                ops::cache_key(&plan.input, transform, plan.target.id, &remote)
+                    .map_err(|f| fail(&record.id, f.message, None))?,
+            )
+        };
+        let (staged, owned) = if plan.action == Action::Passthrough {
+            (plan.input.clone(), false)
+        } else if let Some(cached) = key.as_deref().and_then(ops::cached) {
+            self.emit(Event::Log(format!("reusing the encode kept for {remote}")));
+            (cached, true)
         } else {
             let staged =
-                std::env::temp_dir().join(format!("tryxctl-tui-{}-{}", std::process::id(), name));
+                std::env::temp_dir().join(format!("tryxctl-tui-{}-{}", std::process::id(), remote));
             let events = self.events.clone();
-            let progress_name = name.clone();
-            encode::run(&ffmpeg, &plan, &staged, plan.duration, |progress| {
-                if let Some(fraction) = progress.fraction {
-                    let _ = events.send(Event::UploadProgress {
-                        name: progress_name.clone(),
-                        fraction,
-                    });
-                }
-            })
-            .map_err(|e| e.to_string())?;
-            finish_stage(&ffprobe, &plan, &staged).map_err(|f| f.message)?;
-            staged
+            let progress_name = remote.clone();
+            self.cancel.store(false, Ordering::Relaxed);
+            let encoded = encode::run_cancellable(
+                &ffmpeg,
+                &plan,
+                &staged,
+                plan.duration,
+                Some(&self.cancel),
+                |progress| {
+                    if let Some(fraction) = progress.fraction {
+                        let _ = events.send(Event::UploadProgress {
+                            name: progress_name.clone(),
+                            fraction,
+                        });
+                    }
+                },
+            )
+            .map_err(|e| e.to_string())
+            .and_then(|()| finish_stage(&ffprobe, &plan, &staged).map_err(|f| f.message));
+            if let Err(message) = encoded {
+                let _ = std::fs::remove_file(&staged);
+                self.emit(Event::UploadProgress {
+                    name: remote.clone(),
+                    fraction: 1.0,
+                });
+                return Err(fail(&record.id, message, None));
+            }
+            (staged, true)
         };
         self.emit(Event::UploadProgress {
-            name: name.clone(),
+            name: remote.clone(),
             fraction: 1.0,
         });
+        let size = std::fs::metadata(&staged).map(|m| m.len()).unwrap_or(0);
+        let sha256 = encode::sha256_file(&staged).unwrap_or_default();
         let result = if self.target.is_some() {
-            self.adb()?.push(&staged, &name).map_err(|e| e.to_string())
+            self.adb()?
+                .push(&staged, &remote)
+                .map_err(|e| e.to_string())
         } else {
             let events = self.events.clone();
-            let progress_name = name.clone();
+            let progress_name = remote.clone();
             self.connection()?
-                .upload(&staged, &name, |sent, total| {
+                .upload(&staged, &remote, |sent, total| {
                     if total > 0 {
                         let _ = events.send(Event::UploadProgress {
                             name: progress_name.clone(),
@@ -376,18 +661,47 @@ impl WorkerState {
                 })
                 .map_err(|f| f.message)
         };
-        if staged != plan.input {
-            let _ = std::fs::remove_file(&staged);
-        }
-        result?;
         self.emit(Event::UploadProgress {
-            name: name.clone(),
+            name: remote.clone(),
             fraction: 1.0,
         });
+        match result {
+            Ok(()) => {
+                if owned {
+                    let _ = std::fs::remove_file(&staged);
+                }
+                if let Some(key) = &key {
+                    ops::discard(key);
+                }
+                ops::finish(
+                    &record.id,
+                    Outcome::Ok,
+                    None,
+                    None,
+                    Some(size),
+                    Some(sha256),
+                );
+            }
+            Err(message) => {
+                let cached = match (&key, owned) {
+                    (Some(key), true) => ops::keep(key, &staged).ok(),
+                    _ => None,
+                };
+                let note = if cached.is_some() {
+                    "; the encode is kept, retry it from Operations"
+                } else {
+                    ""
+                };
+                let message = fail(&record.id, format!("{message}{note}"), cached);
+                self.operations();
+                return Err(message);
+            }
+        }
         self.emit(Event::Log(format!(
-            "uploaded {name} ({})",
+            "uploaded {remote} ({})",
             plan.description
         )));
+        self.operations();
         self.refresh()
     }
 }

@@ -18,6 +18,7 @@ owo-colors = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
+libc = "0.2"
 tryx-device = { path = "../tryx-device" }
 tryx-kanali = { path = "../tryx-kanali" }
 tryx-legacy = { path = "../tryx-legacy" }

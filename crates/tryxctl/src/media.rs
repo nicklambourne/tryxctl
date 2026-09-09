@@ -121,12 +121,12 @@ impl TransformArgs {
     }
 }
 
-struct Analysis {
-    report: Report,
-    plan: Option<Plan>,
+pub(crate) struct Analysis {
+    pub(crate) report: Report,
+    pub(crate) plan: Option<Plan>,
 }
 
-fn analyse(ffprobe: &Path, path: &Path, options: &Options, target: Target) -> Analysis {
+pub(crate) fn analyse(ffprobe: &Path, path: &Path, options: &Options, target: Target) -> Analysis {
     let unreadable = |message: String| Analysis {
         report: Report {
             path: path.to_path_buf(),
@@ -223,6 +223,31 @@ fn summary_line(report: &Report) -> String {
             .to_string(),
     );
     parts.join(" · ")
+}
+
+/// The findings and the plan as plain lines, for the interface.
+pub(crate) fn finding_lines(analysis: &Analysis) -> Vec<String> {
+    let mut lines: Vec<String> = analysis
+        .report
+        .findings
+        .iter()
+        .map(|finding| {
+            let badge = match finding.severity {
+                Severity::Ok => " ok ",
+                Severity::Auto => "fix ",
+                Severity::Decide => "ask ",
+                Severity::Fatal => "FAIL",
+            };
+            match &finding.action {
+                Some(action) => format!("[{badge}] {} → {action}", finding.message),
+                None => format!("[{badge}] {}", finding.message),
+            }
+        })
+        .collect();
+    if let Some(plan) = &analysis.plan {
+        lines.push(format!("plan: {} → {}", plan.description, plan.name));
+    }
+    lines
 }
 
 fn print_report(analysis: &Analysis) {

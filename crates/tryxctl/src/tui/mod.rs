@@ -8,7 +8,8 @@ use crate::exit::{self, CommandResult, Failure};
 use crate::legacy::{self, Backend};
 use app::App;
 use crossterm::event::{self, Event, KeyEventKind};
-use std::sync::mpsc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 use worker::{Request, Worker};
 
@@ -22,11 +23,18 @@ pub fn run(session: &legacy::Session) -> CommandResult {
     };
     let (request_tx, request_rx) = mpsc::channel::<Request>();
     let (event_tx, event_rx) = mpsc::channel();
-    let worker = Worker::spawn(session.clone(), target, request_rx, event_tx);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let worker = Worker::spawn(
+        session.clone(),
+        target,
+        cancel.clone(),
+        request_rx,
+        event_tx,
+    );
     request_tx.send(Request::Refresh).ok();
 
     let mut terminal = ratatui::init();
-    let mut app = App::new(request_tx.clone());
+    let mut app = App::new(request_tx.clone(), cancel);
     let result = loop {
         if let Err(error) = terminal.draw(|frame| app.render(frame)) {
             break Err(Failure::environment(format!("could not draw: {error}")));

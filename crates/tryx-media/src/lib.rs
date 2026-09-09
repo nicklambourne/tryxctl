@@ -39,6 +39,8 @@ pub enum MediaError {
     Encode { status: String, stderr: String },
     #[error("{path}: {message}")]
     Verify { path: PathBuf, message: String },
+    #[error("cancelled")]
+    Cancelled,
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

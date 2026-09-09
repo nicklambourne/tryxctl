@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Progress {
@@ -33,6 +34,18 @@ pub fn run(
     plan: &Plan,
     output: &Path,
     duration: Option<f64>,
+    on_progress: impl FnMut(Progress),
+) -> Result<(), MediaError> {
+    run_cancellable(ffmpeg, plan, output, duration, None, on_progress)
+}
+
+/// [`run`], stopping ffmpeg and removing the output once `cancel` is set.
+pub fn run_cancellable(
+    ffmpeg: &Path,
+    plan: &Plan,
+    output: &Path,
+    duration: Option<f64>,
+    cancel: Option<&AtomicBool>,
     mut on_progress: impl FnMut(Progress),
 ) -> Result<(), MediaError> {
     if plan.action == Action::Passthrough {
@@ -58,6 +71,12 @@ pub fn run(
     let mut progress = Progress::default();
     for line in BufReader::new(stdout).lines() {
         let line = line?;
+        if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(output);
+            return Err(MediaError::Cancelled);
+        }
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };

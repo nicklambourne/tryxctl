@@ -315,6 +315,12 @@ enum MediaAction {
 }
 
 fn main() -> ExitCode {
+    // A closed pipe (`| head`) ends the process quietly instead of a panic.
+    // SAFETY: resetting a signal disposition before any thread exists.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     if cli.no_color {
         owo_colors::set_override(false);
