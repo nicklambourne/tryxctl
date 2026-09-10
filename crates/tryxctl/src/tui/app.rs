@@ -1487,8 +1487,10 @@ mod tests {
             }
             _ => panic!("expected a play request"),
         }
+        // Any program stands in for ffmpeg here; /bin/sh exists in every
+        // build sandbox and exits at once on these arguments.
         let player = Player::start(
-            std::path::Path::new("/bin/cat"),
+            std::path::Path::new("/bin/sh"),
             std::path::Path::new("/dev/null"),
             None,
             None,
