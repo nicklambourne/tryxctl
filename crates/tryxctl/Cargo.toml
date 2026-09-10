@@ -28,6 +28,8 @@ viuer = { version = "0.9", features = ["print-file"] }
 which = { workspace = true }
 ratatui-image = "8"
 image = "0.25"
+flate2 = "1"
+base64 = "0.22"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.30", features = ["user"] }

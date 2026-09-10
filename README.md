@@ -83,7 +83,13 @@ again) or the service will not see the new group.
 
 The interface previews media inline: a short looping clip of the selected
 file on the display, and the file being uploaded as the display will get
-it (four seconds at six frames a second; a GIF animates, a still stays). It uses
+it (four seconds at six frames a second; a GIF animates, a still stays).
+`p` plays the selected file or the wizard's file in real time instead:
+ffmpeg streams it at its own pace, frames the redraw does not reach are
+dropped, and the pane's title shows the rate achieved. Kitty-protocol
+terminals get real pixels; everything else gets half-blocks. Sixel and
+iTerm2 terminals fall back to half-blocks for playback too, since they
+would re-send every frame in full. It uses
 kitty graphics, iTerm2 images, or Sixel when the terminal offers them, and
 coloured half-blocks otherwise; `TRYXCTL_GRAPHICS=kitty|iterm2|sixel|halfblocks`
 forces one, which is also how to get pictures inside tmux with

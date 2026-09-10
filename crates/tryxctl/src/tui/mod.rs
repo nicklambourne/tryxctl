@@ -2,6 +2,7 @@
 //! ([`worker`]); the screen ([`app`]) only sends requests and draws events.
 
 mod app;
+mod player;
 mod preview;
 mod worker;
 
@@ -45,7 +46,7 @@ pub fn run(session: &legacy::Session) -> CommandResult {
         while let Ok(event) = event_rx.try_recv() {
             app.handle_event(event);
         }
-        match event::poll(Duration::from_millis(100)) {
+        match event::poll(Duration::from_millis(app.tick_ms())) {
             Ok(true) => match event::read() {
                 Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => {
                     if app.handle_key(key) {

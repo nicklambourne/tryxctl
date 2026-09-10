@@ -2179,10 +2179,12 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "base64",
  "clap",
  "clap_complete",
  "clap_mangen",
  "crossterm",
+ "flate2",
  "image",
  "libc",
  "nix 0.30.1",

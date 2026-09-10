@@ -102,24 +102,48 @@ pub fn device_clip(ffmpeg: &Path, adb: &Adb, name: &str, size: u64) -> Result<Cl
     if let Ok(clip) = decode_dir(&frames_dir) {
         return Ok(clip);
     }
-    let part = dir.join(format!("{name}.part"));
-    let prefix = adb
-        .read_prefix(name, PREFIX_BYTES)
-        .map_err(|e| e.to_string())?;
-    std::fs::write(&part, &prefix).map_err(|e| e.to_string())?;
-    let mut rendered = render_small_clip(ffmpeg, &part, &frames_dir);
-    if rendered.is_err() && u64::try_from(prefix.len()).unwrap_or(0) < size {
-        // The index sits at the end (no faststart): fetch it all, once.
+    let whole = whole_file_path(&dir, name, size);
+    let rendered = if whole.is_file() {
+        render_small_clip(ffmpeg, &whole, &frames_dir)
+    } else {
+        let part = dir.join(format!("{name}.part"));
+        let prefix = adb
+            .read_prefix(name, PREFIX_BYTES)
+            .map_err(|e| e.to_string())?;
+        std::fs::write(&part, &prefix).map_err(|e| e.to_string())?;
+        let mut rendered = render_small_clip(ffmpeg, &part, &frames_dir);
+        if rendered.is_err() && u64::try_from(prefix.len()).unwrap_or(0) < size {
+            // The index sits at the end (no faststart): fetch it all, once,
+            // and keep it; playback wants the whole file anyway.
+            let _ = std::fs::remove_file(&part);
+            adb.pull(name, &whole).map_err(|e| e.to_string())?;
+            rendered = render_small_clip(ffmpeg, &whole, &frames_dir);
+        }
         let _ = std::fs::remove_file(&part);
-        adb.pull(name, &part).map_err(|e| e.to_string())?;
-        rendered = render_small_clip(ffmpeg, &part, &frames_dir);
-    }
-    let _ = std::fs::remove_file(&part);
+        rendered
+    };
     if let Err(why) = rendered {
         let _ = std::fs::remove_dir_all(&frames_dir);
         return Err(format!("no frame could be decoded: {why}"));
     }
     decode_dir(&frames_dir)
+}
+
+fn whole_file_path(dir: &Path, name: &str, size: u64) -> PathBuf {
+    dir.join(format!("{name}-{size}.whole"))
+}
+
+/// A local copy of a file on a legacy display, pulled once and kept beside
+/// its thumbnails.
+pub fn device_file(adb: &Adb, name: &str, size: u64) -> Result<PathBuf, String> {
+    let dir = thumbs_dir().ok_or("no cache directory")?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let whole = whole_file_path(&dir, name, size);
+    if whole.is_file() && std::fs::metadata(&whole).map(|m| m.len()).unwrap_or(0) == size {
+        return Ok(whole);
+    }
+    adb.pull(name, &whole).map_err(|e| e.to_string())?;
+    Ok(whole)
 }
 
 /// A clip of a local file as the display would get it, through the

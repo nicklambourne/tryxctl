@@ -1,6 +1,7 @@
 //! Screen state, key handling, and drawing.
 
-use super::worker::{DeviceRow, Event, Request};
+use super::player::{Player, Sink};
+use super::worker::{DeviceRow, Event, PlaySource, Request};
 use crate::legacy::{Info, Readback};
 use crate::media::TransformArgs;
 use crate::metrics::LABELS;
@@ -143,6 +144,10 @@ pub struct App {
     wizard: Option<Wizard>,
     picker: Picker,
     previews: HashMap<String, Moving>,
+    /// Real-time playback in the preview pane, keyed like the previews.
+    player: Option<(String, Player)>,
+    /// The preview pane as last drawn, for sizing a playback request.
+    preview_pane: Option<Rect>,
     preview_order: VecDeque<String>,
     preview_failures: HashMap<String, String>,
     preview_requested: HashSet<String>,
@@ -180,6 +185,8 @@ impl App {
             wizard: None,
             picker,
             previews: HashMap::new(),
+            player: None,
+            preview_pane: None,
             preview_order: VecDeque::new(),
             preview_failures: HashMap::new(),
             preview_requested: HashSet::new(),
@@ -236,8 +243,72 @@ impl App {
         )
     }
 
+    /// How long the event loop waits between redraws: fast while playing.
+    pub fn tick_ms(&self) -> u64 {
+        if self.player.is_some() { 16 } else { 100 }
+    }
+
+    /// How playback frames should reach this terminal.
+    fn sink(&self) -> Sink {
+        if self.picker.protocol_type() == ProtocolType::Kitty && std::env::var_os("TMUX").is_none()
+        {
+            Sink::Kitty {
+                cell: self.picker.font_size(),
+            }
+        } else {
+            Sink::Halfblocks
+        }
+    }
+
+    /// Starts or stops playback of `key` from `source`.
+    fn toggle_play(&mut self, key: String, source: PlaySource) {
+        if self
+            .player
+            .as_ref()
+            .is_some_and(|(playing, _)| *playing == key)
+        {
+            self.player = None;
+            self.status = "stopped".to_string();
+            return;
+        }
+        self.player = None;
+        let Some(pane) = self.preview_pane else {
+            return;
+        };
+        let inner = Block::bordered().inner(pane);
+        self.status = "starting playback…".to_string();
+        self.send(Request::Play {
+            key,
+            source,
+            cols: inner.width,
+            rows: inner.height,
+            sink: self.sink(),
+        });
+    }
+
     /// Draws the picture for `key`, or says why there is none.
     fn render_preview(&mut self, frame: &mut Frame, area: Rect, key: &str, waiting: &str) {
+        self.preview_pane = Some(area);
+        if let Some((playing, player)) = self.player.as_mut()
+            && playing == key
+        {
+            let (fps, _, dropped) = player.stats();
+            let title = if let Some(error) = player.error() {
+                format!(" Playback failed: {error} ")
+            } else if !player.running() {
+                " Playback ended (p replays) ".to_string()
+            } else {
+                format!(
+                    " Playing · {fps:.0} fps shown · {dropped} dropped · {} · p stops ",
+                    player.sink.name()
+                )
+            };
+            let block = Block::bordered().title(title);
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            player.draw(inner, frame.buffer_mut());
+            return;
+        }
         let title = format!(" Preview · {} ", protocol_name(self.picker.protocol_type()));
         let block = Block::bordered().title(title);
         let inner = block.inner(area);
@@ -303,6 +374,10 @@ impl App {
             } => self.store_preview(key, frames, Duration::from_millis(interval_ms)),
             Event::PreviewFailed { key, reason } => {
                 self.preview_failures.insert(key, reason);
+            }
+            Event::Playing { key, player } => {
+                self.player = Some((key, *player));
+                self.status = "playing (p stops)".to_string();
             }
             Event::Operations(records) => {
                 self.operations = records;
@@ -433,6 +508,7 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.wizard = None;
+                self.player = None;
                 return;
             }
             KeyCode::Char('m') => {
@@ -449,6 +525,15 @@ impl App {
             KeyCode::Char('-') => {
                 let zoom = wizard.transform.zoom.unwrap_or(100);
                 wizard.transform.zoom = Some(zoom.saturating_sub(25).max(100));
+            }
+            KeyCode::Char('p') => {
+                let key = Self::wizard_key(wizard);
+                let source = PlaySource::Local {
+                    path: wizard.path.clone(),
+                    transform: Box::new(wizard.transform.clone()),
+                };
+                self.toggle_play(key, source);
+                return;
             }
             KeyCode::Enter => {
                 if !wizard.acceptable {
@@ -543,6 +628,12 @@ impl App {
                 }
             }
             KeyCode::Char('u') => self.prompt = Some(Prompt::UploadPath(String::new())),
+            KeyCode::Char('p') => {
+                if let Some(file) = self.selected_file() {
+                    let (name, size) = (file.name.clone(), file.size);
+                    self.toggle_play(format!("thumb:{name}"), PlaySource::Device { name, size });
+                }
+            }
             _ => {}
         }
     }
@@ -815,7 +906,8 @@ impl App {
                 }
             })
             .collect();
-        let title = " Library · Enter show · l loop files · d delete · e export · u upload ";
+        let title =
+            " Library · Enter show · p play · l loop files · d delete · e export · u upload ";
         let list = List::new(items)
             .block(Block::bordered().title(title))
             .highlight_style(Style::new().add_modifier(Modifier::REVERSED));
@@ -1130,7 +1222,7 @@ impl App {
             .fg(Color::Cyan),
             (None, None, Some(error)) => Line::from(format!("error: {error}")).fg(Color::Red),
             (None, None, None) if self.wizard.is_some() => {
-                Line::from("m mode · r rotate · +/- zoom · Enter upload · Esc back").dim()
+                Line::from("m mode · r rotate · +/- zoom · p play · Enter upload · Esc back").dim()
             }
             (None, None, None) => Line::from(format!(
                 "{}   q quits · Tab switches · r refreshes",
@@ -1368,6 +1460,53 @@ mod tests {
         };
         still.current(start + Duration::from_secs(5));
         assert_eq!(still.index, 0, "a still never moves");
+    }
+
+    #[test]
+    fn p_starts_playback_sized_to_the_pane_and_stops_it_again() {
+        let (mut app, rx) = app_with_files();
+        for _ in 0..6 {
+            app.handle_key(KeyEvent::from(KeyCode::Down));
+        }
+        rendered(&mut app, 120, 30);
+        let _ = rx.try_recv(); // the thumbnail request
+        assert_eq!(app.tick_ms(), 100);
+        app.handle_key(KeyEvent::from(KeyCode::Char('p')));
+        match rx.try_recv().unwrap() {
+            Request::Play {
+                key,
+                source: PlaySource::Device { name, size },
+                cols,
+                rows,
+                sink,
+            } => {
+                assert_eq!(key, "thumb:vendor.mp4");
+                assert_eq!((name.as_str(), size), ("vendor.mp4", 303_549_636));
+                assert!(cols > 20 && rows > 5, "sized to the pane: {cols}x{rows}");
+                assert_eq!(sink, Sink::Halfblocks);
+            }
+            _ => panic!("expected a play request"),
+        }
+        let player = Player::start(
+            std::path::Path::new("/bin/cat"),
+            std::path::Path::new("/dev/null"),
+            None,
+            None,
+            4,
+            2,
+            Sink::Halfblocks,
+        )
+        .unwrap();
+        app.handle_event(Event::Playing {
+            key: "thumb:vendor.mp4".into(),
+            player: Box::new(player),
+        });
+        assert_eq!(app.tick_ms(), 16);
+        let text = rendered(&mut app, 120, 30);
+        assert!(text.contains("Play"), "{text}");
+        app.handle_key(KeyEvent::from(KeyCode::Char('p')));
+        assert!(app.player.is_none());
+        assert_eq!(app.tick_ms(), 100);
     }
 
     #[test]

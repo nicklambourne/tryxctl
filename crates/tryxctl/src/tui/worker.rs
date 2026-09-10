@@ -8,6 +8,7 @@ use crate::media::{self, TransformArgs, connect_adb, finish_stage};
 use crate::metrics::pc_info;
 use crate::ops::{self, Outcome, Pending, Record};
 use crate::state;
+use crate::tui::player::{Player, Sink};
 use crate::tui::preview as pictures;
 use image::DynamicImage;
 use std::path::{Path, PathBuf};
@@ -55,6 +56,14 @@ pub enum Request {
         path: PathBuf,
         transform: Box<TransformArgs>,
     },
+    /// Real-time playback in a pane of `cols`×`rows` cells.
+    Play {
+        key: String,
+        source: PlaySource,
+        cols: u16,
+        rows: u16,
+        sink: Sink,
+    },
     Upload {
         path: PathBuf,
         transform: Box<TransformArgs>,
@@ -63,6 +72,18 @@ pub enum Request {
     ClearCache,
     PushMetrics(bool),
     Quit,
+}
+
+/// What to play: a file on the display, or a local file through a transform.
+pub enum PlaySource {
+    Device {
+        name: String,
+        size: u64,
+    },
+    Local {
+        path: PathBuf,
+        transform: Box<TransformArgs>,
+    },
 }
 
 /// One connected display, as `tryxctl devices` lists it.
@@ -106,6 +127,10 @@ pub enum Event {
     PreviewFailed {
         key: String,
         reason: String,
+    },
+    Playing {
+        key: String,
+        player: Box<Player>,
     },
     Log(String),
     Error(String),
@@ -301,6 +326,22 @@ impl WorkerState {
                 }
                 Ok(())
             }
+            Request::Play {
+                key,
+                source,
+                cols,
+                rows,
+                sink,
+            } => match self.play(source, cols, rows, sink) {
+                Ok(player) => {
+                    self.emit(Event::Playing {
+                        key,
+                        player: Box::new(player),
+                    });
+                    Ok(())
+                }
+                Err(reason) => Err(format!("playback: {reason}")),
+            },
             Request::Preview {
                 key,
                 path,
@@ -577,6 +618,42 @@ impl WorkerState {
             .duration
             .map(|duration| (duration / 3.0).min(2.0));
         pictures::local_clip(&ffmpeg, path, kind, &options.transform, target, at)
+    }
+
+    fn play(
+        &mut self,
+        source: PlaySource,
+        cols: u16,
+        rows: u16,
+        sink: Sink,
+    ) -> Result<Player, String> {
+        let (ffmpeg, ffprobe) = encode::tools().map_err(|e| e.to_string())?;
+        match source {
+            PlaySource::Device { name, size } => {
+                if self.target.is_none() {
+                    return Err(
+                        "no playback on this firmware: media pull is not implemented".to_string(),
+                    );
+                }
+                let adb = self.adb()?;
+                let path = pictures::device_file(adb, &name, size)?;
+                Player::start(&ffmpeg, &path, None, None, cols, rows, sink)
+            }
+            PlaySource::Local { path, transform } => {
+                let options = transform.options(None).map_err(|f| f.message)?;
+                let target = self.connection()?.media_target();
+                let analysis = media::analyse(&ffprobe, &path, &options, target);
+                match analysis.report.kind {
+                    Some(tryx_media::check::Kind::Image) => {
+                        return Err("a still image; the preview already shows it".to_string());
+                    }
+                    Some(_) => {}
+                    None => return Err("not a media file".to_string()),
+                }
+                let geometry = options.transform.image_filter(target.width, target.height);
+                Player::start(&ffmpeg, &path, Some(&geometry), None, cols, rows, sink)
+            }
+        }
     }
 
     fn retry(&mut self, id: &str) -> Result<(), String> {
