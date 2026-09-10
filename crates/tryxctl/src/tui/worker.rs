@@ -100,7 +100,8 @@ pub enum Event {
     Operations(Vec<Record>),
     Preview {
         key: String,
-        image: Box<DynamicImage>,
+        frames: Vec<DynamicImage>,
+        interval_ms: u64,
     },
     PreviewFailed {
         key: String,
@@ -291,9 +292,10 @@ impl WorkerState {
             Request::Thumbnail { name, size } => {
                 let key = format!("thumb:{name}");
                 match self.thumbnail(&name, size) {
-                    Ok(image) => self.emit(Event::Preview {
+                    Ok(clip) => self.emit(Event::Preview {
                         key,
-                        image: Box::new(image),
+                        frames: clip.frames,
+                        interval_ms: clip.interval.as_millis() as u64,
                     }),
                     Err(reason) => self.emit(Event::PreviewFailed { key, reason }),
                 }
@@ -305,9 +307,10 @@ impl WorkerState {
                 transform,
             } => {
                 match self.preview(&path, &transform) {
-                    Ok(image) => self.emit(Event::Preview {
+                    Ok(clip) => self.emit(Event::Preview {
                         key,
-                        image: Box::new(image),
+                        frames: clip.frames,
+                        interval_ms: clip.interval.as_millis() as u64,
                     }),
                     Err(reason) => self.emit(Event::PreviewFailed { key, reason }),
                 }
@@ -548,16 +551,20 @@ impl WorkerState {
         Ok(())
     }
 
-    fn thumbnail(&mut self, name: &str, size: u64) -> Result<DynamicImage, String> {
+    fn thumbnail(&mut self, name: &str, size: u64) -> Result<pictures::Clip, String> {
         if self.target.is_none() {
             return Err("no preview on this firmware: media pull is not implemented".to_string());
         }
         let (ffmpeg, _) = encode::tools().map_err(|e| e.to_string())?;
         let adb = self.adb()?;
-        pictures::device_thumbnail(&ffmpeg, adb, name, size)
+        pictures::device_clip(&ffmpeg, adb, name, size)
     }
 
-    fn preview(&mut self, path: &Path, transform: &TransformArgs) -> Result<DynamicImage, String> {
+    fn preview(
+        &mut self,
+        path: &Path,
+        transform: &TransformArgs,
+    ) -> Result<pictures::Clip, String> {
         let (ffmpeg, ffprobe) = encode::tools().map_err(|e| e.to_string())?;
         let options = transform.options(None).map_err(|f| f.message)?;
         let target = self.connection()?.media_target();
@@ -569,7 +576,7 @@ impl WorkerState {
             .source
             .duration
             .map(|duration| (duration / 3.0).min(2.0));
-        pictures::local_preview(&ffmpeg, path, kind, &options.transform, target, at)
+        pictures::local_clip(&ffmpeg, path, kind, &options.transform, target, at)
     }
 
     fn retry(&mut self, id: &str) -> Result<(), String> {

@@ -81,8 +81,9 @@ what was last applied; a KANALI display is read back for real. Without a daemon 
 systemd user manager (log out fully, or `systemctl --user exit` and log in
 again) or the service will not see the new group.
 
-The interface previews media inline: a frame of the selected file on the
-display, and the file being uploaded as the display will get it. It uses
+The interface previews media inline: a short looping clip of the selected
+file on the display, and the file being uploaded as the display will get
+it (four seconds at six frames a second; a GIF animates, a still stays). It uses
 kitty graphics, iTerm2 images, or Sixel when the terminal offers them, and
 coloured half-blocks otherwise; `TRYXCTL_GRAPHICS=kitty|iterm2|sixel|halfblocks`
 forces one, which is also how to get pictures inside tmux with

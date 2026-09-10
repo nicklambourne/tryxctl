@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 use tryx_legacy::adb::{DiskUsage, MediaFile};
 use tryx_legacy::commands::{PRESETS, SCREEN_FULL, SCREEN_SPLITTING, preset_number};
 use tryx_legacy::{FanStatus, ScreenConfig};
@@ -88,6 +89,29 @@ const DEGREES: [u16; 4] = [0, 90, 180, 270];
 /// Pictures kept ready to draw.
 const PREVIEW_CACHE: usize = 12;
 
+/// A clip: frames cycled on a fixed interval, looping.
+struct Moving {
+    frames: Vec<StatefulProtocol>,
+    index: usize,
+    since: Instant,
+    interval: Duration,
+}
+
+impl Moving {
+    /// The frame due at `now`.
+    fn current(&mut self, now: Instant) -> &mut StatefulProtocol {
+        if self.frames.len() > 1 {
+            let elapsed = now.saturating_duration_since(self.since);
+            let steps = (elapsed.as_millis() / self.interval.as_millis().max(1)) as usize;
+            if steps > 0 {
+                self.index = (self.index + steps) % self.frames.len();
+                self.since = now;
+            }
+        }
+        &mut self.frames[self.index]
+    }
+}
+
 fn protocol_name(protocol: ProtocolType) -> &'static str {
     match protocol {
         ProtocolType::Kitty => "kitty graphics",
@@ -118,7 +142,7 @@ pub struct App {
     prompt: Option<Prompt>,
     wizard: Option<Wizard>,
     picker: Picker,
-    previews: HashMap<String, StatefulProtocol>,
+    previews: HashMap<String, Moving>,
     preview_order: VecDeque<String>,
     preview_failures: HashMap<String, String>,
     preview_requested: HashSet<String>,
@@ -171,9 +195,17 @@ impl App {
         let _ = self.requests.send(request);
     }
 
-    fn store_preview(&mut self, key: String, image: DynamicImage) {
-        let protocol = self.picker.new_resize_protocol(image);
-        if self.previews.insert(key.clone(), protocol).is_none() {
+    fn store_preview(&mut self, key: String, frames: Vec<DynamicImage>, interval: Duration) {
+        let moving = Moving {
+            frames: frames
+                .into_iter()
+                .map(|image| self.picker.new_resize_protocol(image))
+                .collect(),
+            index: 0,
+            since: Instant::now(),
+            interval,
+        };
+        if self.previews.insert(key.clone(), moving).is_none() {
             self.preview_order.push_back(key);
         }
         while self.preview_order.len() > PREVIEW_CACHE {
@@ -210,8 +242,9 @@ impl App {
         let block = Block::bordered().title(title);
         let inner = block.inner(area);
         frame.render_widget(block, area);
-        if let Some(protocol) = self.previews.get_mut(key) {
-            frame.render_stateful_widget(StatefulImage::default(), inner, protocol);
+        if let Some(moving) = self.previews.get_mut(key) {
+            let current = moving.current(Instant::now());
+            frame.render_stateful_widget(StatefulImage::default(), inner, current);
             return;
         }
         let text = match self.preview_failures.get(key) {
@@ -263,7 +296,11 @@ impl App {
                 }
             }
             Event::Readback(readback) => self.readback = Some(*readback),
-            Event::Preview { key, image } => self.store_preview(key, *image),
+            Event::Preview {
+                key,
+                frames,
+                interval_ms,
+            } => self.store_preview(key, frames, Duration::from_millis(interval_ms)),
             Event::PreviewFailed { key, reason } => {
                 self.preview_failures.insert(key, reason);
             }
@@ -1280,7 +1317,8 @@ mod tests {
         }
         app.handle_event(Event::Preview {
             key: "thumb:vendor.mp4".into(),
-            image: Box::new(DynamicImage::ImageRgb8(image)),
+            frames: vec![DynamicImage::ImageRgb8(image)],
+            interval_ms: 166,
         });
         let text = rendered(&mut app, 120, 30);
         assert!(!text.contains("generating the preview"), "{text}");
@@ -1295,6 +1333,41 @@ mod tests {
         app.handle_key(KeyEvent::from(KeyCode::Down));
         let text = rendered(&mut app, 120, 30);
         assert!(text.contains("no frame could be decoded"), "{text}");
+    }
+
+    #[test]
+    fn clips_cycle_their_frames_on_the_interval_and_loop() {
+        let picker = Picker::from_fontsize((8, 16));
+        let frame = |shade: u8| {
+            let mut image = image::RgbImage::new(16, 8);
+            for (_, y, pixel) in image.enumerate_pixels_mut() {
+                *pixel = image::Rgb([shade, (y % 2) as u8 * 200, 0]);
+            }
+            picker.new_resize_protocol(DynamicImage::ImageRgb8(image))
+        };
+        let start = Instant::now();
+        let mut moving = Moving {
+            frames: vec![frame(10), frame(120), frame(240)],
+            index: 0,
+            since: start,
+            interval: Duration::from_millis(100),
+        };
+        moving.current(start);
+        assert_eq!(moving.index, 0);
+        moving.current(start + Duration::from_millis(50));
+        assert_eq!(moving.index, 0, "not due yet");
+        moving.current(start + Duration::from_millis(150));
+        assert_eq!(moving.index, 1);
+        moving.current(start + Duration::from_millis(400));
+        assert_eq!(moving.index, 0, "two steps on, wrapped around");
+        let mut still = Moving {
+            frames: vec![frame(10)],
+            index: 0,
+            since: start,
+            interval: Duration::from_millis(100),
+        };
+        still.current(start + Duration::from_secs(5));
+        assert_eq!(still.index, 0, "a still never moves");
     }
 
     #[test]
