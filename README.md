@@ -88,8 +88,10 @@ it (four seconds at six frames a second; a GIF animates, a still stays).
 ffmpeg streams it at its own pace, frames the redraw does not reach are
 dropped, and the pane's title shows the rate achieved. Kitty-protocol
 terminals get real pixels: through shared memory on a local kitty or
-Ghostty, where only a name crosses the terminal per frame, and as PNG
-otherwise (`TRYXCTL_KITTY_TRANSFER=shm|png|zlib` overrides the choice).
+Ghostty, where only a name crosses the terminal per frame, and as
+zlib-compressed pixels otherwise (`TRYXCTL_KITTY_TRANSFER=shm|png|zlib`
+overrides the choice; PNG frames measure the same as zlib on video). Over
+SSH the picture is kept lean, 480 pixels wide at 15 frames a second.
 Everything else gets half-blocks. Sixel and iTerm2 terminals fall back to
 half-blocks for playback too, since they would re-send every frame in
 full. It uses

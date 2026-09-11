@@ -21,10 +21,27 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-/// Widest frame requested from ffmpeg for a pixel-protocol terminal.
-const MAX_WIDTH: u32 = 640;
-/// Frames per second asked of ffmpeg.
-pub const FPS: u32 = 30;
+/// What a pixel-protocol session may spend: frame width and rate. The full
+/// budget suits a local terminal; the lean one a link such as SSH.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    pub max_width: u32,
+    pub fps: u32,
+}
+
+impl Budget {
+    pub const FULL: Budget = Budget {
+        max_width: 640,
+        fps: 30,
+    };
+    pub const LEAN: Budget = Budget {
+        max_width: 480,
+        fps: 15,
+    };
+}
+
+/// The rate for half-block playback, whose cost is cells, not pixels.
+pub const HALFBLOCK_FPS: u32 = 30;
 
 /// One decoded frame, packed RGB.
 pub struct RawFrame {
@@ -54,6 +71,7 @@ pub enum Sink {
     Kitty {
         cell: (u16, u16),
         transfer: Transfer,
+        budget: Budget,
     },
 }
 
@@ -80,14 +98,29 @@ impl Sink {
     pub fn frame_size(self, cols: u16, rows: u16) -> (u32, u32) {
         match self {
             Sink::Halfblocks => (u32::from(cols.max(1)), u32::from(rows.max(1)) * 2),
-            Sink::Kitty { cell: (cw, ch), .. } => {
+            Sink::Kitty {
+                cell: (cw, ch),
+                budget,
+                ..
+            } => {
                 let full_w = u32::from(cols.max(1)) * u32::from(cw.max(1));
                 let full_h = u32::from(rows.max(1)) * u32::from(ch.max(1));
-                let width = full_w.min(MAX_WIDTH);
+                let width = full_w.min(budget.max_width);
                 let height = (full_h * width / full_w).max(2);
                 (width, height)
             }
         }
+    }
+
+    pub fn fps(self) -> u32 {
+        match self {
+            Sink::Halfblocks => HALFBLOCK_FPS,
+            Sink::Kitty { budget, .. } => budget.fps,
+        }
+    }
+
+    pub fn lean(self) -> bool {
+        matches!(self, Sink::Kitty { budget, .. } if budget == Budget::LEAN)
     }
 }
 
@@ -111,9 +144,9 @@ pub struct Player {
     shm_names: VecDeque<String>,
 }
 
-/// The ffmpeg filter chain producing `width`×`height` frames at [`FPS`],
+/// The ffmpeg filter chain producing `width`×`height` frames at `fps`,
 /// letterboxed, after the optional geometry `prefix`.
-pub fn filter(prefix: Option<&str>, width: u32, height: u32) -> String {
+pub fn filter(prefix: Option<&str>, width: u32, height: u32, fps: u32) -> String {
     let mut chain = String::new();
     if let Some(prefix) = prefix.filter(|p| !p.is_empty()) {
         chain.push_str(prefix);
@@ -121,7 +154,7 @@ pub fn filter(prefix: Option<&str>, width: u32, height: u32) -> String {
     }
     write!(
         chain,
-        "fps={FPS},scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
+        "fps={fps},scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black"
     )
     .unwrap();
     chain
@@ -156,7 +189,7 @@ impl Player {
             .arg("-i")
             .arg(input)
             .args(["-map", "0:v:0", "-vf"])
-            .arg(filter(prefix, width, height))
+            .arg(filter(prefix, width, height, sink.fps()))
             .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -593,11 +626,24 @@ mod tests {
         let kitty = Sink::Kitty {
             cell: (10, 20),
             transfer: Transfer::Png,
+            budget: Budget::FULL,
         };
         assert_eq!(kitty.frame_size(40, 20), (400, 400));
         assert_eq!(kitty.frame_size(100, 20), (640, 256), "capped, aspect kept");
-        assert!(filter(Some("hflip"), 64, 32).starts_with("hflip,fps=30,scale=64:32:"));
-        assert!(filter(None, 64, 32).starts_with("fps=30,"));
+        let lean = Sink::Kitty {
+            cell: (10, 20),
+            transfer: Transfer::Zlib,
+            budget: Budget::LEAN,
+        };
+        assert_eq!(
+            lean.frame_size(100, 20),
+            (480, 192),
+            "the lean budget caps lower"
+        );
+        assert_eq!(lean.fps(), 15);
+        assert!(lean.lean() && !kitty.lean());
+        assert!(filter(Some("hflip"), 64, 32, 30).starts_with("hflip,fps=30,scale=64:32:"));
+        assert!(filter(None, 64, 32, 15).starts_with("fps=15,"));
     }
 
     #[test]

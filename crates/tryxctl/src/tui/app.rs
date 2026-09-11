@@ -1,6 +1,6 @@
 //! Screen state, key handling, and drawing.
 
-use super::player::{Player, Sink, Transfer};
+use super::player::{Budget, Player, Sink, Transfer};
 use super::worker::{DeviceRow, Event, PlaySource, Request};
 use crate::legacy::{Info, Readback};
 use crate::media::TransformArgs;
@@ -258,21 +258,22 @@ impl App {
 
     /// How playback frames should reach this terminal. Shared memory only
     /// works when the terminal runs on this machine and is known to read
-    /// it; PNG is the default over the wire.
+    /// it; zlib is the default over the wire (PNG gains nothing on video),
+    /// and an SSH session gets the lean budget: 480 pixels wide at 15 fps.
     fn sink(&self) -> Sink {
         if self.picker.protocol_type() != ProtocolType::Kitty || std::env::var_os("TMUX").is_some()
         {
             return Sink::Halfblocks;
         }
+        let remote = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+            .iter()
+            .any(|var| std::env::var_os(var).is_some());
         let forced = std::env::var("TRYXCTL_KITTY_TRANSFER").ok();
         let transfer = match forced.as_deref().map(str::to_ascii_lowercase).as_deref() {
             Some("zlib") => Transfer::Zlib,
             Some("png") => Transfer::Png,
             Some("shm") => Transfer::Shm,
             _ => {
-                let remote = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
-                    .iter()
-                    .any(|var| std::env::var_os(var).is_some());
                 let shm_terminal = std::env::var_os("KITTY_WINDOW_ID").is_some()
                     || std::env::var("TERM_PROGRAM")
                         .is_ok_and(|p| p.eq_ignore_ascii_case("ghostty"))
@@ -280,13 +281,14 @@ impl App {
                 if !remote && shm_terminal {
                     Transfer::Shm
                 } else {
-                    Transfer::Png
+                    Transfer::Zlib
                 }
             }
         };
         Sink::Kitty {
             cell: self.picker.font_size(),
             transfer,
+            budget: if remote { Budget::LEAN } else { Budget::FULL },
         }
     }
 
@@ -329,8 +331,9 @@ impl App {
                 " Playback ended (p replays) ".to_string()
             } else {
                 format!(
-                    " Playing · {fps:.0} fps shown · {dropped} dropped · {} · p stops ",
-                    player.sink.name()
+                    " Playing · {fps:.0} fps shown · {dropped} dropped · {}{} · p stops ",
+                    player.sink.name(),
+                    if player.sink.lean() { " · lean" } else { "" }
                 )
             };
             let block = Block::bordered().title(title);
