@@ -87,9 +87,12 @@ it (four seconds at six frames a second; a GIF animates, a still stays).
 `p` plays the selected file or the wizard's file in real time instead:
 ffmpeg streams it at its own pace, frames the redraw does not reach are
 dropped, and the pane's title shows the rate achieved. Kitty-protocol
-terminals get real pixels; everything else gets half-blocks. Sixel and
-iTerm2 terminals fall back to half-blocks for playback too, since they
-would re-send every frame in full. It uses
+terminals get real pixels: through shared memory on a local kitty or
+Ghostty, where only a name crosses the terminal per frame, and as PNG
+otherwise (`TRYXCTL_KITTY_TRANSFER=shm|png|zlib` overrides the choice).
+Everything else gets half-blocks. Sixel and iTerm2 terminals fall back to
+half-blocks for playback too, since they would re-send every frame in
+full. It uses
 kitty graphics, iTerm2 images, or Sixel when the terminal offers them, and
 coloured half-blocks otherwise; `TRYXCTL_GRAPHICS=kitty|iterm2|sixel|halfblocks`
 forces one, which is also how to get pictures inside tmux with

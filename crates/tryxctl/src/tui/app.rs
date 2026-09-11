@@ -1,6 +1,6 @@
 //! Screen state, key handling, and drawing.
 
-use super::player::{Player, Sink};
+use super::player::{Player, Sink, Transfer};
 use super::worker::{DeviceRow, Event, PlaySource, Request};
 use crate::legacy::{Info, Readback};
 use crate::media::TransformArgs;
@@ -148,6 +148,8 @@ pub struct App {
     player: Option<(String, Player)>,
     /// The preview pane as last drawn, for sizing a playback request.
     preview_pane: Option<Rect>,
+    /// A kitty transmit produced by the last draw, for the loop to write.
+    pending_transmit: Option<String>,
     preview_order: VecDeque<String>,
     preview_failures: HashMap<String, String>,
     preview_requested: HashSet<String>,
@@ -187,6 +189,7 @@ impl App {
             previews: HashMap::new(),
             player: None,
             preview_pane: None,
+            pending_transmit: None,
             preview_order: VecDeque::new(),
             preview_failures: HashMap::new(),
             preview_requested: HashSet::new(),
@@ -248,15 +251,42 @@ impl App {
         if self.player.is_some() { 16 } else { 100 }
     }
 
-    /// How playback frames should reach this terminal.
+    /// The kitty transmit the last draw produced, if any.
+    pub fn take_transmit(&mut self) -> Option<String> {
+        self.pending_transmit.take()
+    }
+
+    /// How playback frames should reach this terminal. Shared memory only
+    /// works when the terminal runs on this machine and is known to read
+    /// it; PNG is the default over the wire.
     fn sink(&self) -> Sink {
-        if self.picker.protocol_type() == ProtocolType::Kitty && std::env::var_os("TMUX").is_none()
+        if self.picker.protocol_type() != ProtocolType::Kitty || std::env::var_os("TMUX").is_some()
         {
-            Sink::Kitty {
-                cell: self.picker.font_size(),
+            return Sink::Halfblocks;
+        }
+        let forced = std::env::var("TRYXCTL_KITTY_TRANSFER").ok();
+        let transfer = match forced.as_deref().map(str::to_ascii_lowercase).as_deref() {
+            Some("zlib") => Transfer::Zlib,
+            Some("png") => Transfer::Png,
+            Some("shm") => Transfer::Shm,
+            _ => {
+                let remote = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+                    .iter()
+                    .any(|var| std::env::var_os(var).is_some());
+                let shm_terminal = std::env::var_os("KITTY_WINDOW_ID").is_some()
+                    || std::env::var("TERM_PROGRAM")
+                        .is_ok_and(|p| p.eq_ignore_ascii_case("ghostty"))
+                    || std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some();
+                if !remote && shm_terminal {
+                    Transfer::Shm
+                } else {
+                    Transfer::Png
+                }
             }
-        } else {
-            Sink::Halfblocks
+        };
+        Sink::Kitty {
+            cell: self.picker.font_size(),
+            transfer,
         }
     }
 
@@ -306,7 +336,7 @@ impl App {
             let block = Block::bordered().title(title);
             let inner = block.inner(area);
             frame.render_widget(block, area);
-            player.draw(inner, frame.buffer_mut());
+            self.pending_transmit = player.draw(inner, frame.buffer_mut());
             return;
         }
         let title = format!(" Preview · {} ", protocol_name(self.picker.protocol_type()));
@@ -1487,10 +1517,11 @@ mod tests {
             }
             _ => panic!("expected a play request"),
         }
-        // Any program stands in for ffmpeg here; /bin/sh exists in every
-        // build sandbox and exits at once on these arguments.
+        // Any program stands in for ffmpeg here; cat exits at once on these
+        // arguments, and the flake puts coreutils on the sandbox's PATH.
+        let cat = which::which("cat").expect("cat on PATH");
         let player = Player::start(
-            std::path::Path::new("/bin/sh"),
+            &cat,
             std::path::Path::new("/dev/null"),
             None,
             None,

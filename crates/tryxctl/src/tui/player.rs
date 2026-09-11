@@ -11,6 +11,7 @@ use flate2::write::ZlibEncoder;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::io::{Read, Write as _};
 use std::path::Path;
@@ -33,6 +34,18 @@ pub struct RawFrame {
     pub sequence: u64,
 }
 
+/// How a kitty frame's pixels travel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transfer {
+    /// zlib-compressed raw RGB, base64 in the escape.
+    Zlib,
+    /// A PNG in the escape: smaller, a little more to encode.
+    Png,
+    /// Raw RGB in a POSIX shared-memory object; only its name travels.
+    /// Local kitty and Ghostty only.
+    Shm,
+}
+
 /// How frames reach the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sink {
@@ -40,6 +53,7 @@ pub enum Sink {
     /// Kitty graphics, with the terminal's cell size in pixels.
     Kitty {
         cell: (u16, u16),
+        transfer: Transfer,
     },
 }
 
@@ -47,7 +61,18 @@ impl Sink {
     pub fn name(self) -> &'static str {
         match self {
             Sink::Halfblocks => "half-blocks",
-            Sink::Kitty { .. } => "kitty graphics",
+            Sink::Kitty {
+                transfer: Transfer::Zlib,
+                ..
+            } => "kitty · zlib",
+            Sink::Kitty {
+                transfer: Transfer::Png,
+                ..
+            } => "kitty · png",
+            Sink::Kitty {
+                transfer: Transfer::Shm,
+                ..
+            } => "kitty · shared memory",
         }
     }
 
@@ -55,7 +80,7 @@ impl Sink {
     pub fn frame_size(self, cols: u16, rows: u16) -> (u32, u32) {
         match self {
             Sink::Halfblocks => (u32::from(cols.max(1)), u32::from(rows.max(1)) * 2),
-            Sink::Kitty { cell: (cw, ch) } => {
+            Sink::Kitty { cell: (cw, ch), .. } => {
                 let full_w = u32::from(cols.max(1)) * u32::from(cw.max(1));
                 let full_h = u32::from(rows.max(1)) * u32::from(ch.max(1));
                 let width = full_w.min(MAX_WIDTH);
@@ -81,6 +106,9 @@ pub struct Player {
     last_sequence: u64,
     pub sink: Sink,
     kitty_id: u32,
+    /// Shared-memory objects handed to the terminal, oldest first; the
+    /// terminal unlinks them after reading, and we unlink stragglers.
+    shm_names: VecDeque<String>,
 }
 
 /// The ffmpeg filter chain producing `width`×`height` frames at [`FPS`],
@@ -163,6 +191,7 @@ impl Player {
             last_sequence: 0,
             sink,
             kitty_id: 0x00E0_0000 | (std::process::id() & 0xFFFF),
+            shm_names: VecDeque::new(),
         })
     }
 
@@ -196,22 +225,53 @@ impl Player {
         self.thread.as_ref().is_some_and(|t| !t.is_finished())
     }
 
-    /// Draws the newest frame into `area`.
-    pub fn draw(&mut self, area: Rect, buf: &mut Buffer) {
+    /// Draws the newest frame into `area`. For kitty the cells only carry
+    /// placeholders, which never change; the returned transmit escape has
+    /// to be written to the terminal after the draw.
+    pub fn draw(&mut self, area: Rect, buf: &mut Buffer) -> Option<String> {
         let kitty_id = self.kitty_id;
         let sink = self.sink;
-        let Some(frame) = self.frame() else {
-            return;
-        };
+        let frame = self.frame()?;
         match sink {
-            Sink::Halfblocks => draw_halfblocks(&frame, area, buf),
-            Sink::Kitty { .. } => draw_kitty(&frame, kitty_id, area, buf),
+            Sink::Halfblocks => {
+                draw_halfblocks(&frame, area, buf);
+                None
+            }
+            Sink::Kitty { transfer, .. } => {
+                let rows = area.height.min(DIACRITICS.len() as u16);
+                place_kitty(kitty_id, area, buf);
+                match transfer {
+                    Transfer::Zlib | Transfer::Png => {
+                        Some(kitty_transmit(&frame, kitty_id, area.width, rows, transfer))
+                    }
+                    Transfer::Shm => {
+                        let name = format!(
+                            "/tryxctl-{}-{}",
+                            std::process::id() % 100_000,
+                            frame.sequence % 16
+                        );
+                        shm_publish(&name, &frame.rgb).ok()?;
+                        self.shm_names.push_back(name.clone());
+                        while self.shm_names.len() > 8 {
+                            if let Some(old) = self.shm_names.pop_front() {
+                                shm_unlink(&old);
+                            }
+                        }
+                        Some(kitty_transmit_shm(
+                            &frame, kitty_id, area.width, rows, &name,
+                        ))
+                    }
+                }
+            }
         }
     }
 }
 
 impl Drop for Player {
     fn drop(&mut self) {
+        for name in self.shm_names.drain(..) {
+            shm_unlink(&name);
+        }
         self.shared.stop.store(true, Ordering::Relaxed);
         // The reader notices when ffmpeg's pipe closes; kill through it.
         if let Some(thread) = self.thread.take() {
@@ -295,14 +355,46 @@ pub fn draw_halfblocks(frame: &RawFrame, area: Rect, buf: &mut Buffer) {
     }
 }
 
-/// The kitty transmit command for `frame` under `id`: zlib-compressed RGB,
-/// base64 in 4 KiB chunks, as a virtual placement of `cols`×`rows` cells.
-pub fn kitty_transmit(frame: &RawFrame, id: u32, cols: u16, rows: u16) -> String {
-    let mut encoder =
-        ZlibEncoder::new(Vec::with_capacity(frame.rgb.len() / 2), Compression::fast());
-    let _ = encoder.write_all(&frame.rgb);
-    let compressed = encoder.finish().unwrap_or_default();
-    let payload = base64::engine::general_purpose::STANDARD.encode(&compressed);
+/// The pixel data of a frame as it goes into a direct transmit, with the
+/// format keys describing it.
+fn encode_direct(frame: &RawFrame, transfer: Transfer) -> (&'static str, Vec<u8>) {
+    match transfer {
+        Transfer::Png | Transfer::Shm => {
+            let mut png = Vec::with_capacity(frame.rgb.len() / 3);
+            let encoder = image::codecs::png::PngEncoder::new_with_quality(
+                &mut png,
+                image::codecs::png::CompressionType::Fast,
+                image::codecs::png::FilterType::Adaptive,
+            );
+            let _ = image::ImageEncoder::write_image(
+                encoder,
+                &frame.rgb,
+                frame.width,
+                frame.height,
+                image::ExtendedColorType::Rgb8,
+            );
+            ("f=100", png)
+        }
+        Transfer::Zlib => {
+            let mut encoder =
+                ZlibEncoder::new(Vec::with_capacity(frame.rgb.len() / 2), Compression::fast());
+            let _ = encoder.write_all(&frame.rgb);
+            ("f=24,o=z", encoder.finish().unwrap_or_default())
+        }
+    }
+}
+
+/// The kitty transmit command for `frame` under `id`, base64 in 4 KiB
+/// chunks, as a virtual placement of `cols`×`rows` cells.
+pub fn kitty_transmit(
+    frame: &RawFrame,
+    id: u32,
+    cols: u16,
+    rows: u16,
+    transfer: Transfer,
+) -> String {
+    let (format, data) = encode_direct(frame, transfer);
+    let payload = base64::engine::general_purpose::STANDARD.encode(&data);
     let chunks: Vec<&[u8]> = payload.as_bytes().chunks(4096).collect();
     let mut out = String::with_capacity(payload.len() + chunks.len() * 64);
     for (index, chunk) in chunks.iter().enumerate() {
@@ -310,7 +402,7 @@ pub fn kitty_transmit(frame: &RawFrame, id: u32, cols: u16, rows: u16) -> String
         if index == 0 {
             write!(
                 out,
-                "i={id},a=T,U=1,f=24,o=z,t=d,s={},v={},c={cols},r={rows},",
+                "i={id},a=T,U=1,{format},t=d,s={},v={},c={cols},r={rows},",
                 frame.width, frame.height
             )
             .unwrap();
@@ -321,6 +413,99 @@ pub fn kitty_transmit(frame: &RawFrame, id: u32, cols: u16, rows: u16) -> String
         out.push_str("\x1b\\");
     }
     out
+}
+
+/// A transmit whose pixels sit in the shared-memory object `name`: only
+/// the name travels. The terminal unlinks the object once read.
+pub fn kitty_transmit_shm(frame: &RawFrame, id: u32, cols: u16, rows: u16, name: &str) -> String {
+    let payload = base64::engine::general_purpose::STANDARD.encode(name.as_bytes());
+    format!(
+        "\x1b_Gq=2,i={id},a=T,U=1,f=24,t=s,S={},s={},v={},c={cols},r={rows};{payload}\x1b\\",
+        frame.rgb.len(),
+        frame.width,
+        frame.height
+    )
+}
+
+/// Creates the shared-memory object `name` holding `data`.
+#[cfg(unix)]
+pub fn shm_publish(name: &str, data: &[u8]) -> std::io::Result<()> {
+    use std::ffi::CString;
+    let cname = CString::new(name).map_err(|_| std::io::Error::other("bad name"))?;
+    // SAFETY: plain POSIX calls on a fresh object we own until unlinked.
+    unsafe {
+        libc::shm_unlink(cname.as_ptr());
+        let fd = libc::shm_open(
+            cname.as_ptr(),
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+            0o600,
+        );
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let result = (|| {
+            if libc::ftruncate(fd, data.len() as libc::off_t) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let map = libc::mmap(
+                std::ptr::null_mut(),
+                data.len(),
+                libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            if map == libc::MAP_FAILED {
+                return Err(std::io::Error::last_os_error());
+            }
+            std::ptr::copy_nonoverlapping(data.as_ptr(), map as *mut u8, data.len());
+            libc::munmap(map, data.len());
+            Ok(())
+        })();
+        libc::close(fd);
+        if result.is_err() {
+            libc::shm_unlink(cname.as_ptr());
+        }
+        result
+    }
+}
+
+#[cfg(unix)]
+pub fn shm_unlink(name: &str) {
+    if let Ok(cname) = std::ffi::CString::new(name) {
+        // SAFETY: unlinking a name we created; a missing object is fine.
+        unsafe {
+            libc::shm_unlink(cname.as_ptr());
+        }
+    }
+}
+
+#[cfg(all(unix, test))]
+fn shm_read(name: &str, len: usize) -> std::io::Result<Vec<u8>> {
+    use std::ffi::CString;
+    let cname = CString::new(name).map_err(|_| std::io::Error::other("bad name"))?;
+    // SAFETY: read-only mapping of an object this process created.
+    unsafe {
+        let fd = libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let map = libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ,
+            libc::MAP_SHARED,
+            fd,
+            0,
+        );
+        libc::close(fd);
+        if map == libc::MAP_FAILED {
+            return Err(std::io::Error::last_os_error());
+        }
+        let data = std::slice::from_raw_parts(map as *const u8, len).to_vec();
+        libc::munmap(map, len);
+        Ok(data)
+    }
 }
 
 /// The row diacritics of the kitty unicode-placeholder scheme, in order.
@@ -337,11 +522,11 @@ const DIACRITICS: [char; 74] = [
     '\u{6D9}', '\u{6DA}',
 ];
 
-/// Transmits the frame and lays the placeholder cells, the way
-/// ratatui-image does for stills: the escape rides in the first cell's
-/// symbol, every row starts with a placeholder carrying its row diacritic,
-/// and the image id is carried by the foreground colour.
-pub fn draw_kitty(frame: &RawFrame, id: u32, area: Rect, buf: &mut Buffer) {
+/// Lays the placeholder cells the way ratatui-image does for stills: every
+/// row starts with a placeholder carrying its row diacritic, the image id
+/// is carried by the foreground colour, and the cells never change between
+/// frames, so ratatui writes them once. The pixels travel separately.
+pub fn place_kitty(id: u32, area: Rect, buf: &mut Buffer) {
     let rows = area.height.min(DIACRITICS.len() as u16);
     let cols = area.width;
     if rows == 0 || cols == 0 {
@@ -349,9 +534,8 @@ pub fn draw_kitty(frame: &RawFrame, id: u32, area: Rect, buf: &mut Buffer) {
     }
     let [id_extra, id_r, id_g, id_b] = id.to_be_bytes();
     let id_color = format!("\x1b[38;2;{id_r};{id_g};{id_b}m");
-    let mut transmit = Some(kitty_transmit(frame, id, cols, rows));
     for y in 0..rows {
-        let mut symbol = transmit.take().unwrap_or_default();
+        let mut symbol = String::new();
         write!(
             symbol,
             "\x1b[s{id_color}\u{10EEEE}{}{}{}",
@@ -393,10 +577,23 @@ mod tests {
         }
     }
 
+    fn payload_of(text: &str) -> Vec<u8> {
+        let payload = text
+            .trim_start_matches(|c| c != ';')
+            .trim_start_matches(';')
+            .trim_end_matches("\x1b\\");
+        base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap()
+    }
+
     #[test]
     fn frame_sizes_follow_the_pane() {
         assert_eq!(Sink::Halfblocks.frame_size(50, 20), (50, 40));
-        let kitty = Sink::Kitty { cell: (10, 20) };
+        let kitty = Sink::Kitty {
+            cell: (10, 20),
+            transfer: Transfer::Png,
+        };
         assert_eq!(kitty.frame_size(40, 20), (400, 400));
         assert_eq!(kitty.frame_size(100, 20), (640, 256), "capped, aspect kept");
         assert!(filter(Some("hflip"), 64, 32).starts_with("hflip,fps=30,scale=64:32:"));
@@ -439,39 +636,73 @@ mod tests {
     }
 
     #[test]
-    fn kitty_transmit_round_trips_the_pixels_and_places_the_rows() {
+    fn zlib_transmit_round_trips_the_pixels() {
         let frame = frame(4, 2);
-        let text = kitty_transmit(&frame, 0x00E0_1234, 4, 2);
+        let text = kitty_transmit(&frame, 0x00E0_1234, 4, 2, Transfer::Zlib);
         assert!(
             text.starts_with("\x1b_Gq=2,i=14684724,a=T,U=1,f=24,o=z,t=d,s=4,v=2,c=4,r=2,m=0;"),
             "{text}"
         );
-        let payload = text
-            .trim_start_matches(|c| c != ';')
-            .trim_start_matches(';')
-            .trim_end_matches("\x1b\\");
-        let compressed = base64::engine::general_purpose::STANDARD
-            .decode(payload)
-            .unwrap();
+        let compressed = payload_of(&text);
         let mut decoder = flate2::read::ZlibDecoder::new(&compressed[..]);
         let mut rgb = Vec::new();
         decoder.read_to_end(&mut rgb).unwrap();
         assert_eq!(rgb, frame.rgb);
+    }
 
-        let mut buf = Buffer::empty(Rect::new(2, 1, 4, 2));
-        draw_kitty(&frame, 0x00E0_1234, Rect::new(2, 1, 4, 2), &mut buf);
-        let first = buf[(2, 1)].symbol().to_string();
+    #[test]
+    fn png_transmit_round_trips_the_pixels_and_is_smaller() {
+        let frame = frame(64, 32);
+        let text = kitty_transmit(&frame, 7, 8, 4, Transfer::Png);
         assert!(
-            first.starts_with("\x1b_Gq=2,i=14684724"),
-            "the transmit rides in the first cell"
+            text.starts_with("\x1b_Gq=2,i=7,a=T,U=1,f=100,t=d,s=64,v=32,c=8,r=4,"),
+            "{text}"
         );
+        let png = payload_of(&text);
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        let decoded = image::load_from_memory(&png).unwrap().to_rgb8();
+        assert_eq!(decoded.as_raw(), &frame.rgb);
+        let zlib = kitty_transmit(&frame, 7, 8, 4, Transfer::Zlib);
+        assert!(
+            text.len() < zlib.len(),
+            "png {} vs zlib {}",
+            text.len(),
+            zlib.len()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_memory_transmit_names_an_object_holding_the_pixels() {
+        let frame = frame(6, 3);
+        let name = format!("/tryxctl-test-{}", std::process::id() % 100_000);
+        shm_publish(&name, &frame.rgb).unwrap();
+        assert_eq!(shm_read(&name, frame.rgb.len()).unwrap(), frame.rgb);
+        let text = kitty_transmit_shm(&frame, 9, 6, 2, &name);
+        assert!(
+            text.starts_with("\x1b_Gq=2,i=9,a=T,U=1,f=24,t=s,S=54,s=6,v=3,c=6,r=2;"),
+            "{text}"
+        );
+        assert_eq!(payload_of(&text), name.as_bytes());
+        shm_unlink(&name);
+        assert!(shm_read(&name, frame.rgb.len()).is_err(), "unlinked");
+    }
+
+    #[test]
+    fn placeholders_are_laid_once_and_never_carry_pixels() {
+        let mut buf = Buffer::empty(Rect::new(2, 1, 4, 2));
+        place_kitty(0x00E0_1234, Rect::new(2, 1, 4, 2), &mut buf);
+        let first = buf[(2, 1)].symbol().to_string();
+        assert!(!first.contains("_G"), "no transmit in the cells");
         assert!(
             first.contains("\u{10EEEE}\u{305}\u{305}"),
             "row 0 placeholder with row and column diacritics"
         );
         let second = buf[(2, 2)].symbol().to_string();
-        assert!(!second.contains("_G"), "later rows carry placeholders only");
         assert!(second.contains("\u{10EEEE}\u{30D}"), "row 1 diacritic");
         assert!(buf[(3, 1)].skip, "cells under the placeholders are skipped");
+        let mut again = Buffer::empty(Rect::new(2, 1, 4, 2));
+        place_kitty(0x00E0_1234, Rect::new(2, 1, 4, 2), &mut again);
+        assert_eq!(buf, again, "identical every frame, so nothing is re-sent");
     }
 }

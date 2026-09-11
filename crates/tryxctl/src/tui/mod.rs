@@ -43,6 +43,14 @@ pub fn run(session: &legacy::Session) -> CommandResult {
         if let Err(error) = terminal.draw(|frame| app.render(frame)) {
             break Err(Failure::environment(format!("could not draw: {error}")));
         }
+        // Kitty pixels go straight to the terminal: an APC sequence touches
+        // no cell, and the placeholders ratatui drew stay as they are.
+        if let Some(transmit) = app.take_transmit() {
+            use std::io::Write;
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(transmit.as_bytes());
+            let _ = out.flush();
+        }
         while let Ok(event) = event_rx.try_recv() {
             app.handle_event(event);
         }

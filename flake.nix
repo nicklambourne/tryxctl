@@ -33,7 +33,7 @@
 
             nativeBuildInputs = [ pkgs.protobuf pkgs.pkg-config pkgs.installShellFiles pkgs.makeWrapper ];
             buildInputs = [ pkgs.libusb1 ];
-            nativeCheckInputs = [ pkgs.ffmpeg ];
+            nativeCheckInputs = [ pkgs.ffmpeg pkgs.coreutils ];
 
             # The man page and completions come from the binary itself.
             postInstall = lib.optionalString native ''
