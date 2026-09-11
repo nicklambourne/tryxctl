@@ -228,14 +228,15 @@ impl Player {
         })
     }
 
-    /// The newest frame; counts it as shown when it is new.
-    fn frame(&mut self) -> Option<Arc<RawFrame>> {
+    /// The newest frame and whether it is one not yet shown.
+    fn frame(&mut self) -> Option<(Arc<RawFrame>, bool)> {
         let frame = self.shared.latest.lock().unwrap().clone()?;
-        if frame.sequence != self.last_sequence {
+        let new = frame.sequence != self.last_sequence;
+        if new {
             self.last_sequence = frame.sequence;
             self.shown += 1;
         }
-        Some(frame)
+        Some((frame, new))
     }
 
     /// Frames shown per second, frames produced, frames dropped.
@@ -260,11 +261,12 @@ impl Player {
 
     /// Draws the newest frame into `area`. For kitty the cells only carry
     /// placeholders, which never change; the returned transmit escape has
-    /// to be written to the terminal after the draw.
+    /// to be written to the terminal after the draw, and only a frame not
+    /// yet shown produces one, so a redraw between frames costs nothing.
     pub fn draw(&mut self, area: Rect, buf: &mut Buffer) -> Option<String> {
         let kitty_id = self.kitty_id;
         let sink = self.sink;
-        let frame = self.frame()?;
+        let (frame, new) = self.frame()?;
         match sink {
             Sink::Halfblocks => {
                 draw_halfblocks(&frame, area, buf);
@@ -273,6 +275,9 @@ impl Player {
             Sink::Kitty { transfer, .. } => {
                 let rows = area.height.min(DIACRITICS.len() as u16);
                 place_kitty(kitty_id, area, buf);
+                if !new {
+                    return None;
+                }
                 match transfer {
                     Transfer::Zlib | Transfer::Png => {
                         Some(kitty_transmit(&frame, kitty_id, area.width, rows, transfer))
@@ -732,6 +737,46 @@ mod tests {
         assert_eq!(payload_of(&text), name.as_bytes());
         shm_unlink(&name);
         assert!(shm_read(&name, frame.rgb.len()).is_err(), "unlinked");
+    }
+
+    #[test]
+    fn a_frame_is_transmitted_once_however_often_it_is_drawn() {
+        let shared = Arc::new(Shared {
+            stop: AtomicBool::new(false),
+            latest: Mutex::new(Some(Arc::new(frame(4, 2)))),
+            produced: AtomicU64::new(1),
+            error: Mutex::new(None),
+        });
+        let mut player = Player {
+            shared: shared.clone(),
+            thread: None,
+            started: Instant::now(),
+            shown: 0,
+            last_sequence: 0,
+            sink: Sink::Kitty {
+                cell: (8, 16),
+                transfer: Transfer::Zlib,
+                budget: Budget::FULL,
+            },
+            kitty_id: 5,
+            shm_names: VecDeque::new(),
+        };
+        let area = Rect::new(0, 0, 4, 2);
+        let mut buf = Buffer::empty(area);
+        assert!(
+            player.draw(area, &mut buf).is_some(),
+            "first draw transmits"
+        );
+        assert!(
+            player.draw(area, &mut buf).is_none(),
+            "a redraw of the same frame does not"
+        );
+        *shared.latest.lock().unwrap() = Some(Arc::new(RawFrame {
+            sequence: 2,
+            ..frame(4, 2)
+        }));
+        assert!(player.draw(area, &mut buf).is_some(), "a new frame does");
+        assert_eq!(player.stats().1, 1);
     }
 
     #[test]
