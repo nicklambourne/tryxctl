@@ -223,8 +223,9 @@ pub fn media_delete(files: &[String]) -> Value {
 /// Body of `POST fanLCDSet`: `Some(percent)` fixes the speed of the fan on
 /// the display block, `None` hands it back to the firmware's smart curve.
 /// The curve is the vendor app's default, captured by
-/// AfroSamuraiX/panorama-manager (MIT); the firmware wants it present in
-/// both modes.
+/// AfroSamuraiX/panorama-manager (MIT, copyright (c) 2026 AfroSamuraiX; the
+/// full notice is in THIRD_PARTY.md). The firmware wants it present in both
+/// modes.
 pub fn fan_lcd(fixed: Option<u8>) -> Value {
     json!({
         "mode": if fixed.is_some() { "Fixed Mode" } else { "Smart Mode" },

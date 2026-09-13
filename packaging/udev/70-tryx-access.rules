@@ -1,5 +1,8 @@
 # Copied unchanged from DXVSI/Tryx-Linux-GUI v2.2.0
-# (packaging/70-tryx-pase-access.rules), MIT License. See THIRD_PARTY.md.
+# (packaging/70-tryx-pase-access.rules), MIT License.
+# Copyright (c) 2025 Fadli Arsani
+# Copyright (c) 2026 DXVSI
+# The full MIT notice is in THIRD_PARTY.md.
 
 # Supported TRYX displays expose a vendor protocol over a USB Printer Class
 # interface. Mark them for logind ACL assignment before 73-seat-late.rules.
