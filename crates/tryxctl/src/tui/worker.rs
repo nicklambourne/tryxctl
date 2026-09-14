@@ -1367,7 +1367,12 @@ mod tests {
                     assert_eq!(events.last().unwrap(), "media [clip.mp4.h264_2240x1080]");
                 }
                 worker.tick();
-                assert!(display.count("ping") >= 1, "{:?}", display.received());
+                // The keepalive does not wait for the display to read it.
+                assert!(
+                    display.wait_for(Duration::from_secs(10), |d| d.received.contains(&"ping")),
+                    "{:?}",
+                    display.received()
+                );
             },
         );
     }

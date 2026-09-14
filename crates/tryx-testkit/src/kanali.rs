@@ -9,7 +9,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tryx_proto::frame;
@@ -42,6 +42,8 @@ pub struct Display {
     pub transfer_status: i32,
 }
 
+/// Locks ignore poisoning: an assertion that fails inside a test's closure
+/// must not take the display down with it.
 struct Shared {
     display: Mutex<Display>,
     stop: AtomicBool,
@@ -98,7 +100,11 @@ impl FakeKanali {
                                 let shared = shared.clone();
                                 std::thread::spawn(move || serve(stream, &shared))
                             };
-                            shared.clients.lock().unwrap().push(client);
+                            shared
+                                .clients
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .push(client);
                         }
                         Err(_) => std::thread::sleep(Duration::from_millis(10)),
                     }
@@ -114,7 +120,11 @@ impl FakeKanali {
 
     /// Reads or changes the display's state.
     pub fn with<R>(&self, f: impl FnOnce(&mut Display) -> R) -> R {
-        f(&mut self.shared.display.lock().unwrap())
+        f(&mut self
+            .shared
+            .display
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner))
     }
 
     /// The request names so far.
@@ -149,7 +159,13 @@ impl Drop for FakeKanali {
         if let Some(accept) = self.accept.take() {
             let _ = accept.join();
         }
-        for client in self.shared.clients.lock().unwrap().drain(..) {
+        for client in self
+            .shared
+            .clients
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drain(..)
+        {
             let _ = client.join();
         }
         let _ = std::fs::remove_file(&self.socket);
@@ -237,7 +253,10 @@ fn handle(
         request::Body::FileRemoval(_) => "file_removal",
         request::Body::MediaReadChunk(_) => "media_read_chunk",
     };
-    let mut display = shared.display.lock().unwrap();
+    let mut display = shared
+        .display
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     display.received.push(name);
     let (reply_header, reply) = match body {
         request::Body::Ping(ping) => (

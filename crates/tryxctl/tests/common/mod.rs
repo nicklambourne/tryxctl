@@ -3,7 +3,6 @@
 #![allow(dead_code)] // each test binary uses a different part
 
 use std::path::PathBuf;
-use std::time::Duration;
 use tryx_testkit::cm01::SERIAL;
 use tryx_testkit::{FakeAdb, FakeCm01, FakeKanali, Sandbox};
 
@@ -131,13 +130,6 @@ impl Rig {
             serde_json::Value::Array(records) => records,
             _ => Vec::new(),
         }
-    }
-
-    /// Waits for the display to receive `command`.
-    pub fn wait_for_command(&self, command: &str, timeout: Duration) -> bool {
-        self.display.wait_for(timeout, |requests| {
-            requests.iter().any(|r| r.command == command)
-        })
     }
 }
 

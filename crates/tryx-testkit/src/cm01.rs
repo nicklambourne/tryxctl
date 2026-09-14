@@ -9,7 +9,7 @@ use serialport::{SerialPort, TTYPort};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -70,6 +70,8 @@ impl Default for Firmware {
     }
 }
 
+/// Locks ignore poisoning: an assertion that fails inside a test's closure
+/// must not take the display down with it.
 struct Shared {
     firmware: Mutex<Firmware>,
     requests: Mutex<Vec<Request>>,
@@ -131,7 +133,11 @@ impl FakeCm01 {
 
     /// Every request so far, oldest first.
     pub fn requests(&self) -> Vec<Request> {
-        self.shared.requests.lock().unwrap().clone()
+        self.shared
+            .requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// The command names of every request so far.
@@ -149,12 +155,22 @@ impl FakeCm01 {
 
     /// Forgets the requests so far.
     pub fn clear(&self) {
-        self.shared.requests.lock().unwrap().clear();
+        self.shared
+            .requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
     }
 
     /// Changes how the display behaves from its next request on.
     pub fn set(&self, change: impl FnOnce(&mut Firmware)) {
-        change(&mut self.shared.firmware.lock().unwrap());
+        change(
+            &mut self
+                .shared
+                .firmware
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
     }
 
     /// Waits until the requests satisfy `done`; false when `timeout` passes
@@ -162,7 +178,13 @@ impl FakeCm01 {
     pub fn wait_for(&self, timeout: Duration, done: impl Fn(&[Request]) -> bool) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
-            if done(&self.shared.requests.lock().unwrap()) {
+            if done(
+                &self
+                    .shared
+                    .requests
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner),
+            ) {
                 return true;
             }
             if Instant::now() >= deadline {
@@ -213,11 +235,19 @@ fn serve(mut master: TTYPort, shared: &Shared) {
 /// Records the request in `raw` and returns the reply to send, if any.
 fn answer(shared: &Shared, raw: &[u8]) -> Option<Vec<u8>> {
     let request = parse(raw)?;
-    let firmware = shared.firmware.lock().unwrap().clone();
+    let firmware = shared
+        .firmware
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
     let command = request.command.clone();
     // Recorded before the reply goes out, so a client that has its answer
     // always finds its request recorded.
-    shared.requests.lock().unwrap().push(request);
+    shared
+        .requests
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(request);
     if firmware.silent || firmware.unanswered.contains(&command) {
         return None;
     }

@@ -7,6 +7,7 @@ mod common;
 
 use common::{KANALI_ID, KanaliRig, run};
 use serde_json::json;
+use std::time::Duration;
 use tryx_testkit::Sandbox;
 use tryx_testkit::kanali::{PRESET, SERIAL, TURRIS_620};
 use tryx_testkit::media::{self, ffmpeg_available};
@@ -183,7 +184,14 @@ fn metrics_set_leases_the_overlay() {
     ])
     .ok()
     .says("overlay shows CPU Temperature, GPU Usage");
-    let layout = rig.display.with(|d| d.layouts.last().cloned().unwrap());
+    // The layout goes out without waiting for an answer, so the command can
+    // finish before the display has read it.
+    assert!(
+        rig.display
+            .wait_for(Duration::from_secs(10), |d| !d.layouts.is_empty()),
+        "the overlay layout never arrived"
+    );
+    let layout = rig.display.with(|d| d.layouts[0].clone());
     assert!(!layout.label_groups.is_empty(), "{layout:?}");
     rig.run(&["metrics", "set", "--labels", "cpu-voltage"])
         .expect(2)
@@ -342,7 +350,6 @@ fn a_legacy_display_is_preferred_to_ask_about() {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
-    use std::time::Duration;
 
     #[test]
     fn metrics_push_keeps_the_session_and_sends_values() {
@@ -350,7 +357,12 @@ mod linux {
         rig.run(&["metrics", "set", "--labels", "cpu-usage,mem-usage"])
             .ok();
         rig.run(&["metrics", "push", "--once", "--json"]).ok();
-        assert!(rig.display.count("ping") >= 1);
+        assert!(
+            rig.display
+                .wait_for(Duration::from_secs(10), |d| d.received.contains(&"ping")),
+            "{:?}",
+            rig.display.received()
+        );
         assert!(
             rig.display
                 .wait_for(Duration::from_secs(2), |d| !d.metrics.is_empty()),
