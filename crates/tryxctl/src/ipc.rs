@@ -238,6 +238,28 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    proptest::proptest! {
+        #[test]
+        fn frames_round_trip_and_oversized_ones_are_refused(
+            payload in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..4096),
+            declared in (MAX_FRAME as u32 + 1)..u32::MAX,
+        ) {
+            let mut wire = Vec::new();
+            write_frame(&mut wire, &payload).unwrap();
+            proptest::prop_assert_eq!(wire.len(), payload.len() + 4);
+            proptest::prop_assert_eq!(read_frame(&mut wire.as_slice()).unwrap(), payload);
+            // A header promising more than a frame may hold is refused before
+            // anything is allocated for it.
+            let oversized = declared.to_le_bytes();
+            proptest::prop_assert!(read_frame(&mut oversized.as_slice()).is_err());
+            // A frame cut short is an error, not a hang or a short read.
+            if !wire.is_empty() {
+                let cut = &wire[..wire.len() - 1];
+                proptest::prop_assert!(read_frame(&mut &cut[..]).is_err());
+            }
+        }
+    }
+
     #[test]
     fn requests_serialise_with_a_type_tag() {
         let text = serde_json::to_string(&Request::Raw {

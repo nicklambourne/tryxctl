@@ -15,4 +15,5 @@ thiserror = { workspace = true }
 which = { workspace = true }
 
 [dev-dependencies]
+proptest = { workspace = true }
 tryx-testkit = { path = "../tryx-testkit" }

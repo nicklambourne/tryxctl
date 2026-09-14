@@ -35,6 +35,7 @@ base64 = "0.22"
 nix = { version = "0.30", features = ["user"] }
 
 [dev-dependencies]
+proptest = { workspace = true }
 tryx-testkit = { path = "../tryx-testkit" }
 
 [features]

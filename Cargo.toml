@@ -13,6 +13,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 owo-colors = { version = "4", features = ["supports-colors"] }
 predicates = "3"
+proptest = "1"
 prost = "0.14"
 prost-build = "0.14"
 rusb = "0.9"
