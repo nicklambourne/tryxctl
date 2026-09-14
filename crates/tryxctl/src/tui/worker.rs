@@ -838,3 +838,497 @@ impl WorkerState {
         self.refresh()
     }
 }
+
+/// The worker against a fake display and a fake adb. Each test runs in its
+/// own process confined to a sandbox, since the worker reads the saved
+/// state, the journal, and the device tree from its environment.
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::legacy::{Connection, Session};
+    use std::sync::mpsc;
+    use tryx_legacy::{Client, SerialLink};
+    use tryx_testkit::cm01::SERIAL;
+    use tryx_testkit::media::{self as samples, ffmpeg_available};
+    use tryx_testkit::{FakeAdb, FakeCm01, Sandbox, isolated};
+
+    struct Rig {
+        display: FakeCm01,
+        adb: FakeAdb,
+        worker: WorkerState,
+        events: Receiver<Event>,
+    }
+
+    impl Rig {
+        /// A worker holding the fake display's port directly, as it would
+        /// after connecting without a daemon.
+        fn new(sandbox: &Sandbox) -> Rig {
+            let display = FakeCm01::start();
+            sandbox.plug("3-12", SERIAL, "ttyACM0", display.port());
+            let adb = FakeAdb::install(sandbox, SERIAL, "3-12");
+            let session = Session {
+                tty: None,
+                device: None,
+                verbose: false,
+                direct: true,
+            };
+            let (events_tx, events) = mpsc::channel();
+            let target = crate::legacy::select(None).expect("the plugged display");
+            let mut worker = WorkerState::new(
+                session,
+                Some(target),
+                Arc::new(AtomicBool::new(false)),
+                events_tx,
+            );
+            let client = Client::from_link(SerialLink::from_port(Box::new(display.open()), "fake"));
+            worker.connection = Some(Connection::Direct {
+                client: Box::new(client),
+                target: Box::new(crate::legacy::select(None).unwrap()),
+            });
+            worker.adb = Some(connect_adb(worker.target.as_ref().unwrap()).unwrap().0);
+            Rig {
+                display,
+                adb,
+                worker,
+                events,
+            }
+        }
+
+        /// Handles `request` and describes the events it produced.
+        fn handle(&mut self, request: Request) -> Vec<String> {
+            self.worker.handle(request);
+            self.events
+                .try_iter()
+                .map(|event| describe(&event))
+                .collect()
+        }
+    }
+
+    fn describe(event: &Event) -> String {
+        match event {
+            Event::Info(info) => format!("info {}", info.serial()),
+            Event::Fans(fans) => format!("fans {:?}", fans.lcd_fan_rpm),
+            Event::Via(via) => format!("via {via}"),
+            Event::Media { files, storage } => format!(
+                "media [{}]{}",
+                files
+                    .iter()
+                    .map(|f| f.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                if storage.is_some() {
+                    " with storage"
+                } else {
+                    ""
+                }
+            ),
+            Event::Devices(rows) => format!(
+                "devices [{}]",
+                rows.iter()
+                    .map(|r| format!("{} {}", r.id, r.protocol))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Event::Sample(_) => "sample".to_string(),
+            Event::Pushing(on) => format!("pushing {on}"),
+            Event::UploadProgress { name, .. } => format!("progress {name}"),
+            Event::Analysis {
+                acceptable, lines, ..
+            } => {
+                format!("analysis acceptable={acceptable} {}", lines.join(" | "))
+            }
+            Event::Readback(readback) => format!("readback [{}]", readback.media.join(", ")),
+            Event::Operations(records) => format!("operations {}", records.len()),
+            Event::Preview { key, frames, .. } => {
+                format!("preview {key} {} frame(s)", frames.len())
+            }
+            Event::PreviewFailed { key, reason } => format!("no preview {key}: {reason}"),
+            Event::Playing { key, .. } => format!("playing {key}"),
+            Event::Log(text) => format!("log {text}"),
+            Event::Error(text) => format!("error {text}"),
+        }
+    }
+
+    #[test]
+    fn refresh_reports_files_devices_transfers_and_the_screen() {
+        isolated(
+            "tui::worker::tests::refresh_reports_files_devices_transfers_and_the_screen",
+            |sandbox| {
+                let mut rig = Rig::new(sandbox);
+                rig.adb.put("clip.mp4", &[0; 64]);
+                let port = sandbox.port("ttyACM0");
+                assert_eq!(
+                    rig.handle(Request::Refresh),
+                    [
+                        "media [clip.mp4] with storage".to_string(),
+                        format!("devices [usb:003-12 legacy ({})]", port.display()),
+                        "operations 0".to_string(),
+                        "readback []".to_string(),
+                    ]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn show_and_settings_reach_the_display_and_are_remembered() {
+        isolated(
+            "tui::worker::tests::show_and_settings_reach_the_display_and_are_remembered",
+            |sandbox| {
+                let mut rig = Rig::new(sandbox);
+                assert_eq!(
+                    rig.handle(Request::Show {
+                        media: vec!["clip.mp4".into()],
+                        play: "Loop".into()
+                    }),
+                    ["log showing clip.mp4 (Loop)", "readback [clip.mp4]"]
+                );
+                assert_eq!(rig.display.received("waterBlockScreenId").len(), 2);
+                assert_eq!(state::load().screen.play_mode, "Loop");
+                assert_eq!(
+                    rig.handle(Request::Show {
+                        media: vec!["preset:4".into()],
+                        play: "Single".into()
+                    })[0],
+                    "log showing Pre-set 4: Exo-Ecologies (Single)"
+                );
+
+                assert_eq!(rig.handle(Request::Brightness(40)), ["log brightness 40"]);
+                assert_eq!(rig.display.received("brightness")[0].json()["value"], 40);
+                assert_eq!(state::load().brightness, Some(40));
+
+                let screen = ScreenConfig {
+                    media: vec!["clip.mp4".into()],
+                    sysinfo_display: vec!["CPU Usage".into()],
+                    ..ScreenConfig::default()
+                };
+                assert_eq!(
+                    rig.handle(Request::Overlay(Box::new(screen.clone()))),
+                    ["log overlay: CPU Usage"]
+                );
+                assert_eq!(
+                    rig.display
+                        .received("sysinfoDisplay")
+                        .last()
+                        .unwrap()
+                        .json()["items"][0],
+                    "CPU Usage"
+                );
+                let split = ScreenConfig {
+                    screen_mode: tryx_legacy::commands::SCREEN_SPLITTING.into(),
+                    ..screen
+                };
+                assert_eq!(
+                    rig.handle(Request::Layout {
+                        screen: Box::new(split),
+                        rotation: Some(90)
+                    }),
+                    [
+                        "log layout: screen splitting, waterfall off, rotation 90°",
+                        "readback [clip.mp4]"
+                    ]
+                );
+                assert_eq!(rig.display.received("rotate")[0].json()["degree"], 90);
+                assert_eq!(state::load().rotation, Some(90));
+
+                rig.display.set(|firmware| firmware.silent = true);
+                if let Some(Connection::Direct { client, .. }) = rig.worker.connection.as_mut() {
+                    client.link_mut().response_timeout = Duration::from_millis(100);
+                }
+                let failed = rig.handle(Request::Brightness(10));
+                assert_eq!(failed, ["error no response to `brightness` within 100 ms"]);
+                assert_eq!(
+                    state::load().brightness,
+                    Some(40),
+                    "a failed change is not saved"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn delete_and_export_work_on_the_display_files() {
+        isolated(
+            "tui::worker::tests::delete_and_export_work_on_the_display_files",
+            |sandbox| {
+                let mut rig = Rig::new(sandbox);
+                rig.adb.put("a.png", b"a");
+                let bytes: Vec<u8> = (0..=255).cycle().take(5000).collect();
+                rig.adb.put("clip.mp4", &bytes);
+                assert_eq!(
+                    rig.handle(Request::Delete("a.png".into())),
+                    ["log removed a.png", "media [clip.mp4] with storage"]
+                );
+                assert_eq!(
+                    rig.display.received("mediaDelete")[0].json()["include"][0],
+                    "a.png"
+                );
+                assert_eq!(rig.adb.names(), ["clip.mp4"]);
+
+                let path = sandbox.work().join("clip.mp4");
+                assert_eq!(
+                    rig.handle(Request::Export("clip.mp4".into())),
+                    [format!("log exported clip.mp4 to {}", path.display())]
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                assert_eq!(
+                    rig.handle(Request::Export("clip.mp4".into())),
+                    [format!("error {} exists already", path.display())]
+                );
+                assert_eq!(
+                    rig.handle(Request::Export("gone.mp4".into())),
+                    ["error gone.mp4 is not on the display"]
+                );
+                // A pull that stops short leaves nothing that passes for the file.
+                rig.adb.put("second.mp4", &bytes);
+                rig.adb.truncate_pulls(Some(100));
+                assert_eq!(
+                    rig.handle(Request::Export("second.mp4".into())),
+                    ["error pulled 100 of 5000 bytes; the copy was removed"]
+                );
+                assert!(!sandbox.work().join("second.mp4").exists());
+            },
+        );
+    }
+
+    #[test]
+    fn uploads_are_journalled_and_a_failed_one_retries_from_its_kept_encode() {
+        isolated(
+            "tui::worker::tests::uploads_are_journalled_and_a_failed_one_retries_from_its_kept_encode",
+            |sandbox| {
+                if !ffmpeg_available() {
+                    return;
+                }
+                let mut rig = Rig::new(sandbox);
+                let still = samples::picture(&sandbox.work().join("still.png"), 64, 32);
+                let plain = || Box::new(TransformArgs::default());
+                let events = rig.handle(Request::Upload {
+                    path: still.clone(),
+                    transform: plain(),
+                });
+                assert!(
+                    events.contains(&"progress still.png".to_string()),
+                    "{events:?}"
+                );
+                assert!(
+                    events.iter().any(|e| e.starts_with("log uploaded still.png (convert to a 1920×960 PNG")),
+                    "{events:?}"
+                );
+                assert_eq!(events.last().unwrap(), "media [still.png] with storage");
+                assert!(rig.adb.read("still.png").is_some());
+                assert_eq!(
+                    rig.handle(Request::Upload {
+                        path: still,
+                        transform: plain()
+                    }),
+                    ["error still.png already exists on the display"]
+                );
+
+                // Two transfers begun by one process within a second each keep
+                // their own record.
+                let other = samples::picture(&sandbox.work().join("other.png"), 64, 32);
+                rig.adb.fail("push", Some("adb: error: closed"));
+                let events = rig.handle(Request::Upload {
+                    path: other,
+                    transform: plain(),
+                });
+                let error = events
+                    .iter()
+                    .find(|e| e.starts_with("error "))
+                    .expect("an error");
+                assert!(
+                    error.ends_with("; the encode is kept, retry it from Operations"),
+                    "{error}"
+                );
+                let records = ops::load();
+                assert_eq!(records.len(), 2);
+                assert_ne!(records[0].id, records[1].id);
+                assert_eq!(
+                    (records[0].remote.as_str(), records[0].outcome),
+                    ("still.png", Outcome::Ok)
+                );
+                assert_eq!(
+                    (records[1].remote.as_str(), records[1].outcome),
+                    ("other.png", Outcome::Failed)
+                );
+                let kept = records[1].cached.clone().expect("the encode is kept");
+                assert!(kept.is_file());
+
+                rig.adb.fail("push", None);
+                let events = rig.handle(Request::Retry(records[1].id.clone()));
+                assert!(
+                    events.contains(&"log reusing the encode kept for other.png".to_string()),
+                    "{events:?}"
+                );
+                assert!(
+                    events
+                        .iter()
+                        .any(|e| e.starts_with("log uploaded other.png")),
+                    "{events:?}"
+                );
+                assert!(!kept.exists(), "the kept encode was sent and removed");
+                assert_eq!(ops::load().last().unwrap().outcome, Outcome::Ok);
+
+                assert_eq!(
+                    rig.handle(Request::Retry(records[0].id.clone())),
+                    ["error only failed transfers can be retried"]
+                );
+                assert_eq!(
+                    rig.handle(Request::Retry("nope".into())),
+                    ["error no transfer nope"]
+                );
+                assert_eq!(
+                    rig.handle(Request::ClearCache),
+                    ["operations 3", "log kept encodes removed (0)"]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn analysis_and_previews_describe_local_and_display_files() {
+        isolated(
+            "tui::worker::tests::analysis_and_previews_describe_local_and_display_files",
+            |sandbox| {
+                if !ffmpeg_available() {
+                    return;
+                }
+                let mut rig = Rig::new(sandbox);
+                let clip = samples::clip(&sandbox.work().join("clip.mp4"), 320, 180, 2.0);
+                let events = rig.handle(Request::Analyse {
+                    path: clip.clone(),
+                    transform: Box::new(TransformArgs::default()),
+                });
+                assert_eq!(events.len(), 1);
+                assert!(
+                    events[0].starts_with("analysis acceptable=true "),
+                    "{events:?}"
+                );
+                assert!(
+                    events[0].contains("plan: re-encode to 1920×960 H.264 MP4"),
+                    "{events:?}"
+                );
+
+                let events = rig.handle(Request::Preview {
+                    key: "local".into(),
+                    path: clip.clone(),
+                    transform: Box::new(TransformArgs::default()),
+                });
+                assert!(events[0].starts_with("preview local "), "{events:?}");
+                assert!(!events[0].starts_with("preview local 0 "), "{events:?}");
+
+                // A file on the display is previewed from its first megabytes
+                // over adb, once, and then from the cache.
+                let bytes = std::fs::read(&clip).unwrap();
+                rig.adb.put("clip.mp4", &bytes);
+                let size = bytes.len() as u64;
+                let thumb = |rig: &mut Rig| {
+                    rig.handle(Request::Thumbnail {
+                        name: "clip.mp4".into(),
+                        size,
+                    })
+                };
+                let events = thumb(&mut rig);
+                assert!(
+                    events[0].starts_with("preview thumb:clip.mp4 "),
+                    "{events:?}"
+                );
+                let first = rig_calls(&rig.adb, "exec-out");
+                assert_eq!(first, 1);
+                assert_eq!(thumb(&mut rig).len(), 1);
+                assert_eq!(
+                    rig_calls(&rig.adb, "exec-out"),
+                    first,
+                    "the second preview came from the cache"
+                );
+
+                let notes = sandbox.work().join("notes.txt");
+                std::fs::write(&notes, "text").unwrap();
+                let events = rig.handle(Request::Preview {
+                    key: "notes".into(),
+                    path: notes,
+                    transform: Box::new(TransformArgs::default()),
+                });
+                assert_eq!(events, ["no preview notes: not a media file"]);
+            },
+        );
+    }
+
+    fn rig_calls(adb: &FakeAdb, verb: &str) -> usize {
+        adb.calls()
+            .iter()
+            .filter(|call| call.contains(verb))
+            .count()
+    }
+
+    #[test]
+    fn metrics_pushes_follow_the_toggle() {
+        isolated(
+            "tui::worker::tests::metrics_pushes_follow_the_toggle",
+            |sandbox| {
+                let mut rig = Rig::new(sandbox);
+                assert_eq!(rig.handle(Request::PushMetrics(true)), ["pushing true"]);
+                rig.worker.tick();
+                let events: Vec<String> = rig.events.try_iter().map(|e| describe(&e)).collect();
+                assert_eq!(events, ["fans Some(1280)", "sample"]);
+                assert_eq!(rig.display.received("all").len(), 1);
+                assert_eq!(rig.handle(Request::PushMetrics(false)), ["pushing false"]);
+                rig.worker.tick();
+                let events: Vec<String> = rig.events.try_iter().map(|e| describe(&e)).collect();
+                assert_eq!(events, ["sample"], "the footer still gets samples");
+                assert_eq!(rig.display.received("all").len(), 1, "no push while off");
+
+                rig.worker.connection = None;
+                assert_eq!(
+                    rig.handle(Request::PushMetrics(true)),
+                    ["error not connected"]
+                );
+                assert_eq!(rig.handle(Request::Brightness(1)), ["error not connected"]);
+            },
+        );
+    }
+
+    /// Connecting by path opens a pseudo-terminal as a serial port, which
+    /// works on Linux only.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_worker_thread_connects_and_stops_when_asked() {
+        isolated(
+            "tui::worker::tests::the_worker_thread_connects_and_stops_when_asked",
+            |sandbox| {
+                let display = FakeCm01::start();
+                sandbox.plug("3-12", SERIAL, "ttyACM0", display.port());
+                let _adb = FakeAdb::install(sandbox, SERIAL, "3-12");
+                let session = Session {
+                    tty: None,
+                    device: None,
+                    verbose: false,
+                    direct: false,
+                };
+                let target = crate::legacy::select(None).unwrap();
+                let (requests_tx, requests) = mpsc::channel();
+                let (events_tx, events) = mpsc::channel();
+                let worker = Worker::spawn(
+                    session,
+                    Some(target),
+                    Arc::new(AtomicBool::new(false)),
+                    requests,
+                    events_tx,
+                );
+                requests_tx.send(Request::Refresh).unwrap();
+                let mut seen = Vec::new();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !seen.iter().any(|e: &String| e.starts_with("readback")) {
+                    assert!(Instant::now() < deadline, "{seen:?}");
+                    if let Ok(event) = events.recv_timeout(Duration::from_millis(100)) {
+                        seen.push(describe(&event));
+                    }
+                }
+                assert_eq!(seen[0], "via serial");
+                assert_eq!(seen[1], format!("info {SERIAL}"));
+                requests_tx.send(Request::Quit).unwrap();
+                worker.join();
+            },
+        );
+    }
+}

@@ -399,3 +399,116 @@ pub fn clear(json: bool, journal: bool) -> CommandResult {
     }
     Ok(exit::ok())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(id: &str) -> Record {
+        Record {
+            id: id.to_string(),
+            kind: "upload".into(),
+            started_unix: 0,
+            finished_unix: None,
+            source: PathBuf::from("clip.mp4"),
+            name: None,
+            remote: "clip.mp4".into(),
+            target: "legacy-panorama".into(),
+            transform: TransformArgs::default(),
+            show: false,
+            replace: false,
+            outcome: Outcome::Failed,
+            error: None,
+            cached: None,
+            size: None,
+            sha256: None,
+        }
+    }
+
+    #[test]
+    fn ids_are_distinct_even_within_one_second() {
+        let ids: std::collections::HashSet<String> = (0..1000).map(|_| new_id()).collect();
+        assert_eq!(ids.len(), 1000);
+        for id in ids.iter().take(10) {
+            assert_eq!(id.len(), 12);
+            assert!(id.bytes().all(|b| b.is_ascii_hexdigit()), "{id}");
+        }
+    }
+
+    #[test]
+    fn a_transfer_is_found_by_its_id_or_a_unique_prefix() {
+        let records = || {
+            vec![
+                record("a1b2c3d4e5f6"),
+                record("a1b2ffffffff"),
+                record("0123"),
+            ]
+        };
+        assert_eq!(find(records(), "a1b2c3d4e5f6").unwrap().id, "a1b2c3d4e5f6");
+        assert_eq!(find(records(), "a1b2c").unwrap().id, "a1b2c3d4e5f6");
+        assert_eq!(find(records(), "0").unwrap().id, "0123");
+        let ambiguous = find(records(), "a1b2").unwrap_err();
+        assert!(
+            ambiguous.message.contains("begins 2 transfer ids"),
+            "{}",
+            ambiguous.message
+        );
+        assert!(find(records(), "").is_err(), "an empty id names nothing");
+        assert!(
+            find(records(), "ffff")
+                .unwrap_err()
+                .message
+                .contains("no transfer ffff")
+        );
+        // A whole id wins over being the prefix of a longer one.
+        let nested = vec![record("abc"), record("abcdef")];
+        assert_eq!(find(nested, "abc").unwrap().id, "abc");
+    }
+
+    #[test]
+    fn ages_read_naturally() {
+        assert_eq!(age(0), "0 s ago");
+        assert_eq!(age(59), "59 s ago");
+        assert_eq!(age(60), "1 min ago");
+        assert_eq!(age(7_199), "1 h ago");
+        assert_eq!(age(86_400 * 3), "3 d ago");
+    }
+
+    #[test]
+    fn the_cache_key_changes_with_anything_that_changes_the_encode() {
+        let dir = std::env::temp_dir().join(format!("tryxctl-ops-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("clip.mp4");
+        std::fs::write(&source, b"one").unwrap();
+        let plain = TransformArgs::default();
+        let key = cache_key(&source, &plain, "legacy-panorama", "clip.mp4").unwrap();
+        assert_eq!(key.len(), 24);
+        assert_eq!(
+            key,
+            cache_key(&source, &plain, "legacy-panorama", "clip.mp4").unwrap()
+        );
+        let rotated = TransformArgs {
+            rotate: 90,
+            ..TransformArgs::default()
+        };
+        assert_ne!(
+            key,
+            cache_key(&source, &rotated, "legacy-panorama", "clip.mp4").unwrap()
+        );
+        assert_ne!(
+            key,
+            cache_key(&source, &plain, "kanali-panorama", "clip.mp4").unwrap()
+        );
+        assert_ne!(
+            key,
+            cache_key(&source, &plain, "legacy-panorama", "other.mp4").unwrap()
+        );
+        std::fs::write(&source, b"longer").unwrap();
+        assert_ne!(
+            key,
+            cache_key(&source, &plain, "legacy-panorama", "clip.mp4").unwrap()
+        );
+        assert!(cache_key(&dir.join("missing.mp4"), &plain, "legacy-panorama", "x").is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

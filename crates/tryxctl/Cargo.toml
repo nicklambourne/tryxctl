@@ -35,8 +35,7 @@ base64 = "0.22"
 nix = { version = "0.30", features = ["user"] }
 
 [dev-dependencies]
-assert_cmd = { workspace = true }
-which = { workspace = true }
+tryx-testkit = { path = "../tryx-testkit" }
 
 [features]
 static = ["tryx-device/static"]

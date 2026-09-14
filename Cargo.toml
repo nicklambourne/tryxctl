@@ -10,7 +10,6 @@ repository = "https://github.com/nicklambourne/tryxctl"
 
 [workspace.dependencies]
 anyhow = "1"
-assert_cmd = "2"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 owo-colors = { version = "4", features = ["supports-colors"] }
 predicates = "3"
