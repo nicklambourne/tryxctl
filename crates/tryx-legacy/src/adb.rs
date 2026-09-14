@@ -63,7 +63,10 @@ pub fn parse_devices(output: &str) -> Vec<AdbDevice> {
 }
 
 /// Chooses the ADB transport that belongs to a USB device, by serial first,
-/// then by the `usb:<bus>-<ports>` qualifier, then by being the only device.
+/// then by the `usb:<bus>-<ports>` qualifier. Only when the caller has
+/// neither to match on is a lone transport taken as the one: with an identity
+/// that matched nothing, the only transport may well be another Android
+/// device, such as a phone.
 pub fn select<'a>(
     devices: &'a [AdbDevice],
     usb_serial: Option<&str>,
@@ -78,6 +81,9 @@ pub fn select<'a>(
         && let Some(device) = devices.iter().find(|d| d.usb.as_deref() == Some(name))
     {
         return Some(device);
+    }
+    if usb_serial.is_some() || sysfs_name.is_some() {
+        return None;
     }
     match devices {
         [only] => Some(only),
@@ -307,6 +313,10 @@ mod tests {
             Some(&"XYZ000000000000001".to_string())
         );
         assert_eq!(select(&devices, Some("other"), Some("1-1")), None);
+        // An identity that matches nothing never falls back to a lone
+        // transport, which could be a phone rather than the display.
+        assert_eq!(select(&devices[..1], Some("other"), None), None);
+        assert_eq!(select(&devices[..1], None, Some("9-9")), None);
         assert_eq!(
             select(&devices[1..], None, None).map(|d| &d.serial),
             Some(&"emulator-5554".to_string())

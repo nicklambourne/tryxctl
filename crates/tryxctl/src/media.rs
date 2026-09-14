@@ -466,6 +466,14 @@ pub fn convert(
 }
 
 pub fn connect_adb(target: &DeviceTarget) -> Result<(Adb, String), Failure> {
+    // Without a discovered device there is no serial or USB port to find the
+    // right adb transport by, and guessing could reach another Android device.
+    if target.device.is_none() {
+        return Err(Failure::device(format!(
+            "no TRYX display found at {}, so its files cannot be reached over adb; `tryxctl devices` lists the connected displays",
+            target.tty
+        )));
+    }
     let adb = Adb::new()?;
     let devices = adb.devices()?;
     let selected = adb::select(&devices, target.usb_serial(), target.sysfs_name()).ok_or_else(|| {

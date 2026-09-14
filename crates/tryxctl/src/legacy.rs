@@ -188,10 +188,24 @@ impl Session {
         Ok(client)
     }
 
-    /// The daemon when it is listening (unless `--direct`), else the display.
+    /// Whether a running daemon should carry commands for the display these
+    /// options name: any display when none is named, otherwise only the one
+    /// the daemon holds. A command aimed at another display goes to it
+    /// directly instead of silently acting on the daemon's.
+    pub fn daemon_owns_target(&self, status: &DaemonStatus) -> bool {
+        match (&self.tty, &self.device) {
+            (None, None) => true,
+            (Some(tty), _) => status.protocol == Protocol::Legacy && same_port(tty, &status.tty),
+            (None, Some(device)) => status.protocol == Protocol::Kanali && *device == status.tty,
+        }
+    }
+
+    /// The daemon when it is listening and owns the requested display
+    /// (unless `--direct`), else the display itself.
     pub fn connect(&self) -> Result<Connection, Failure> {
         if !self.direct
             && let Some(status) = ipc::status()?
+            && self.daemon_owns_target(&status)
         {
             return Ok(Connection::Daemon {
                 protocol: status.protocol,
@@ -633,13 +647,27 @@ pub fn hardware_names(saved: &mut DisplayState) -> (String, String) {
     (cpu, gpu)
 }
 
+/// Whether two names refer to the same port, following symlinks such as
+/// `/dev/serial/by-id/…`.
+pub fn same_port(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 pub fn select(tty_override: Option<&str>) -> Result<Target, Failure> {
     if let Some(tty) = tty_override {
         let device = tryx_device::discover().ok().and_then(|discovery| {
-            discovery
-                .legacy_devices
-                .into_iter()
-                .find(|device| device.tty.as_deref() == Some(tty))
+            discovery.legacy_devices.into_iter().find(|device| {
+                device
+                    .tty
+                    .as_deref()
+                    .is_some_and(|port| same_port(port, tty))
+            })
         });
         return Ok(Target {
             tty: tty.to_string(),
@@ -677,5 +705,81 @@ pub fn select(tty_override: Option<&str>) -> Result<Target, Failure> {
         _ => Err(Failure::device(
             "several legacy displays are connected; choose one with --tty",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(tty: Option<&str>, device: Option<&str>) -> Session {
+        Session {
+            tty: tty.map(str::to_string),
+            device: device.map(str::to_string),
+            verbose: false,
+            direct: false,
+        }
+    }
+
+    fn daemon(protocol: Protocol, owned: &str) -> DaemonStatus {
+        DaemonStatus {
+            protocol,
+            tty: owned.to_string(),
+            connected: true,
+            ..DaemonStatus::default()
+        }
+    }
+
+    #[test]
+    fn a_command_naming_no_display_goes_through_the_daemon() {
+        assert!(session(None, None).daemon_owns_target(&daemon(Protocol::Legacy, "/dev/ttyACM0")));
+        assert!(session(None, None).daemon_owns_target(&daemon(Protocol::Kanali, "usb:003-4")));
+    }
+
+    #[test]
+    fn a_tty_only_reaches_the_daemon_that_holds_that_port() {
+        let legacy = daemon(Protocol::Legacy, "/dev/ttyACM0");
+        assert!(session(Some("/dev/ttyACM0"), None).daemon_owns_target(&legacy));
+        assert!(!session(Some("/dev/ttyACM1"), None).daemon_owns_target(&legacy));
+        assert!(!session(Some("/nonexistent/ttyTRYX"), None).daemon_owns_target(&legacy));
+        // A KANALI daemon never owns a serial port.
+        assert!(
+            !session(Some("/dev/ttyACM0"), None)
+                .daemon_owns_target(&daemon(Protocol::Kanali, "/dev/ttyACM0"))
+        );
+        // A daemon that never connected holds no port at all.
+        assert!(
+            !session(Some("/dev/ttyACM0"), None).daemon_owns_target(&daemon(Protocol::Legacy, ""))
+        );
+    }
+
+    #[test]
+    fn a_device_id_only_reaches_the_kanali_daemon_holding_it() {
+        let kanali = daemon(Protocol::Kanali, "usb:003-4");
+        assert!(session(None, Some("usb:003-4")).daemon_owns_target(&kanali));
+        assert!(!session(None, Some("usb:001-2")).daemon_owns_target(&kanali));
+        assert!(
+            !session(None, Some("usb:003-4"))
+                .daemon_owns_target(&daemon(Protocol::Legacy, "usb:003-4"))
+        );
+    }
+
+    #[test]
+    fn ports_match_through_symlinks() {
+        let dir = std::env::temp_dir().join(format!("tryxctl-same-port-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let port = dir.join("ttyACM0");
+        std::fs::write(&port, b"").unwrap();
+        let link = dir.join("usb-rockchip-cm01_se-if00");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&port, &link).unwrap();
+        let (port, link) = (port.to_string_lossy(), link.to_string_lossy());
+        assert!(same_port(&port, &port));
+        assert!(same_port(&link, &port));
+        assert!(same_port(&port, &link));
+        assert!(!same_port(&port, "/nonexistent/ttyACM0"));
+        // A daemon holding the port under one name owns it under the other.
+        assert!(session(Some(&link), None).daemon_owns_target(&daemon(Protocol::Legacy, &port)));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
