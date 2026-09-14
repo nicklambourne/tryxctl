@@ -655,12 +655,13 @@ pub fn sanitize_stem(stem: &str) -> String {
             last_dash = true;
         }
     }
-    let trimmed = out.trim_matches(|ch| ch == '-' || ch == '.').to_string();
-    let trimmed: String = trimmed.chars().take(100).collect();
+    // Shortened before the trim, so a cut cannot leave a dash or dot at the end.
+    let shortened: String = out.chars().take(100).collect();
+    let trimmed = shortened.trim_matches(|ch| ch == '-' || ch == '.');
     if trimmed.is_empty() {
         "media".to_string()
     } else {
-        trimmed
+        trimmed.to_string()
     }
 }
 
@@ -954,6 +955,13 @@ mod tests {
         assert_eq!(
             sanitize_stem("2025-12-09_19-48-54-100"),
             "2025-12-09_19-48-54-100"
+        );
+        // Shortening to 100 characters leaves no dash or dot at the end.
+        let long = format!("{} x", "a".repeat(99));
+        assert_eq!(sanitize_stem(&long), "a".repeat(99));
+        assert_eq!(
+            sanitize_stem(&format!("{}.x", "b".repeat(99))),
+            "b".repeat(99)
         );
     }
 
