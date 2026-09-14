@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 use tryx_testkit::cm01::SERIAL;
-use tryx_testkit::{FakeAdb, FakeCm01, Sandbox};
+use tryx_testkit::{FakeAdb, FakeCm01, FakeKanali, Sandbox};
 
 /// The sysfs name of the fake display's USB port.
 pub const USB: &str = "3-12";
@@ -137,6 +137,52 @@ impl Rig {
     pub fn wait_for_command(&self, command: &str, timeout: Duration) -> bool {
         self.display.wait_for(timeout, |requests| {
             requests.iter().any(|r| r.command == command)
+        })
+    }
+}
+
+/// The sysfs name of the fake KANALI display's USB port.
+pub const KANALI_USB: &str = "3-4";
+/// The id tryxctl gives the fake KANALI display.
+pub const KANALI_ID: &str = "usb:003-4";
+
+/// A sandbox with a fake KANALI display plugged in.
+pub struct KanaliRig {
+    pub sandbox: Sandbox,
+    pub display: FakeKanali,
+}
+
+impl KanaliRig {
+    /// A Panorama SE.
+    pub fn new() -> KanaliRig {
+        KanaliRig::with_product(tryx_testkit::kanali::PANORAMA_SE)
+    }
+
+    pub fn with_product(product_id: u16) -> KanaliRig {
+        let sandbox = Sandbox::new();
+        let socket = sandbox.plug_kanali(KANALI_USB, product_id, tryx_testkit::kanali::SERIAL);
+        let display = FakeKanali::start(&socket);
+        KanaliRig { sandbox, display }
+    }
+
+    pub fn run(&self, args: &[&str]) -> Run {
+        run(&self.sandbox, args)
+    }
+
+    /// The saved display state.
+    pub fn state(&self) -> serde_json::Value {
+        read_json(self.sandbox.state_file())
+    }
+
+    /// The media the display is set to show.
+    pub fn showing(&self) -> String {
+        self.display.with(|display| {
+            display
+                .config
+                .work_config
+                .as_ref()
+                .map(|work| work.single_mode_media_file.clone())
+                .unwrap_or_default()
         })
     }
 }

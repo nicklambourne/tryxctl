@@ -1254,6 +1254,12 @@ mod tests {
         );
     }
 
+    /// Handles `request` and describes the events it produced.
+    fn handle(worker: &mut WorkerState, events: &Receiver<Event>, request: Request) -> Vec<String> {
+        worker.handle(request);
+        events.try_iter().map(|event| describe(&event)).collect()
+    }
+
     fn rig_calls(adb: &FakeAdb, verb: &str) -> usize {
         adb.calls()
             .iter()
@@ -1284,6 +1290,84 @@ mod tests {
                     ["error not connected"]
                 );
                 assert_eq!(rig.handle(Request::Brightness(1)), ["error not connected"]);
+            },
+        );
+    }
+
+    #[test]
+    fn a_kanali_connection_lists_uploads_and_keeps_the_session() {
+        isolated(
+            "tui::worker::tests::a_kanali_connection_lists_uploads_and_keeps_the_session",
+            |sandbox| {
+                let socket = sandbox.plug_kanali("3-4", tryx_testkit::kanali::PANORAMA_SE, "K1");
+                let display = tryx_testkit::FakeKanali::start(&socket);
+                let session = Session {
+                    tty: None,
+                    device: None,
+                    verbose: false,
+                    direct: true,
+                };
+                let (events_tx, events) = mpsc::channel();
+                let mut worker =
+                    WorkerState::new(session, None, Arc::new(AtomicBool::new(false)), events_tx);
+                worker.connect();
+                let seen: Vec<String> = events.try_iter().map(|e| describe(&e)).collect();
+                assert_eq!(
+                    seen,
+                    [
+                        "via usb".to_string(),
+                        format!("info {}", tryx_testkit::kanali::SERIAL),
+                        "pushing true".to_string()
+                    ]
+                );
+                let refreshed = handle(&mut worker, &events, Request::Refresh);
+                assert_eq!(refreshed[0], "media []");
+                assert_eq!(refreshed[1], "devices [usb:003-4 KANALI]");
+                assert_eq!(
+                    refreshed[3],
+                    format!("readback [{}]", tryx_testkit::kanali::PRESET)
+                );
+                assert_eq!(
+                    handle(&mut worker, &events, Request::Export("x".into())),
+                    ["error pulling media from a KANALI display is not implemented"]
+                );
+                assert_eq!(
+                    handle(
+                        &mut worker,
+                        &events,
+                        Request::Thumbnail {
+                            name: "x".into(),
+                            size: 1
+                        }
+                    ),
+                    [
+                        "no preview thumb:x: no preview on this firmware: media pull is not implemented"
+                    ]
+                );
+                assert_eq!(
+                    handle(&mut worker, &events, Request::Brightness(20)),
+                    ["log brightness 20"]
+                );
+                if ffmpeg_available() {
+                    let clip = samples::clip(&sandbox.work().join("clip.mov"), 160, 120, 1.0);
+                    let events = handle(
+                        &mut worker,
+                        &events,
+                        Request::Upload {
+                            path: clip,
+                            transform: Box::new(TransformArgs::default()),
+                        },
+                    );
+                    assert!(
+                        events
+                            .iter()
+                            .any(|e| e.starts_with("log uploaded clip.mp4.h264_2240x1080")),
+                        "{events:?}"
+                    );
+                    assert_eq!(events.last().unwrap(), "media [clip.mp4.h264_2240x1080]");
+                }
+                worker.tick();
+                assert!(display.count("ping") >= 1, "{:?}", display.received());
             },
         );
     }

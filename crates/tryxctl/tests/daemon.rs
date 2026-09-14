@@ -336,3 +336,94 @@ fn a_stalled_client_does_not_hold_up_the_socket() {
         "{reply}"
     );
 }
+
+mod kanali {
+    use super::*;
+    use common::{KANALI_ID, KANALI_USB, KanaliRig};
+    use tryx_testkit::FakeKanali;
+    use tryx_testkit::kanali::{PANORAMA_SE, PRESET};
+
+    #[test]
+    fn the_daemon_keeps_a_kanali_session_and_carries_commands() {
+        let rig = KanaliRig::new();
+        run(&rig.sandbox, &["metrics", "set", "--labels", "cpu-usage"]).ok();
+        let daemon = Daemon::start(&rig.sandbox);
+        let status = wait_status(&rig.sandbox, &daemon, RECONNECT, |s| s["connected"] == true);
+        assert_eq!(status["protocol"], "kanali");
+        assert_eq!(status["product"], "panorama-se");
+        assert_eq!(status["tty"], KANALI_ID);
+        assert_eq!(
+            status["info"]["serial_number"],
+            tryx_testkit::kanali::SERIAL
+        );
+        assert!(
+            rig.display.wait_for(RECONNECT, |d| d
+                .received
+                .iter()
+                .filter(|r| **r == "ping")
+                .count()
+                >= 2),
+            "keepalive pings: {:?}",
+            rig.display.received()
+        );
+        assert!(
+            rig.display.wait_for(RECONNECT, |d| !d.metrics.is_empty()),
+            "metric values"
+        );
+
+        let info = rig.run(&["info", "--json"]).ok().json();
+        assert_eq!(info["via"], "daemon");
+        rig.run(&["display", "set", "--brightness", "25"]).ok();
+        assert_eq!(
+            rig.display
+                .with(|d| d.config.display_config.unwrap().backlight_brightness),
+            25
+        );
+        rig.run(&["display", "set", "--rotate", "180"]).ok();
+        let readback = rig.run(&["display", "get", "--json"]).ok().json();
+        assert_eq!(readback["source"], "device");
+        assert_eq!(readback["rotation"], 180);
+        assert_eq!(readback["media"], json!([PRESET]));
+        let listed = rig.run(&["media", "ls", "--json"]).ok().json();
+        assert_eq!(listed["via"], "daemon");
+        assert_eq!(listed["presets"][0]["name"], PRESET);
+        rig.run(&["show", PRESET]).ok();
+        rig.run(&["fans"])
+            .expect(3)
+            .complains("fan readings is not available on the KANALI firmware");
+        rig.run(&["display", "reboot"])
+            .expect(3)
+            .complains("reboot is not available");
+
+        if tryx_testkit::media::ffmpeg_available() {
+            let clip =
+                tryx_testkit::media::clip(&rig.sandbox.work().join("clip.mov"), 160, 120, 1.0);
+            rig.run(&["media", "upload", clip.to_str().unwrap()]).ok();
+            let name = "clip.mp4.h264_2240x1080";
+            assert!(rig.display.with(|d| d.files.contains_key(name)));
+            rig.run(&["media", "rm", name]).ok();
+            assert!(rig.display.with(|d| d.files.is_empty()));
+        }
+    }
+
+    #[test]
+    fn the_daemon_finds_a_kanali_display_again_after_it_goes_away() {
+        let sandbox = Sandbox::new();
+        let socket = sandbox.plug_kanali(KANALI_USB, PANORAMA_SE, tryx_testkit::kanali::SERIAL);
+        let first = FakeKanali::start(&socket);
+        let daemon = Daemon::start(&sandbox);
+        wait_status(&sandbox, &daemon, RECONNECT, |s| s["connected"] == true);
+        drop(first);
+        let lost = wait_status(&sandbox, &daemon, RECONNECT, |s| s["connected"] == false);
+        assert!(
+            lost["last_error"]
+                .as_str()
+                .is_some_and(|error| error.starts_with("keepalive: ")),
+            "the reason is kept: {lost}"
+        );
+        let second = FakeKanali::start(&socket);
+        let back = wait_status(&sandbox, &daemon, RECONNECT, |s| s["connected"] == true);
+        assert_eq!(back["reconnects"], 1);
+        assert!(second.wait_for(RECONNECT, |d| d.received.contains(&"ping")));
+    }
+}

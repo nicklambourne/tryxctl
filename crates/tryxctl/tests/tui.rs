@@ -86,3 +86,32 @@ fn without_a_display_the_interface_does_not_start() {
         "never took over the screen"
     );
 }
+
+#[test]
+fn the_interface_lists_a_kanali_display_s_catalog() {
+    let rig = common::KanaliRig::new();
+    rig.display.with(|display| {
+        display
+            .files
+            .insert("aurora.mp4.h264_2240x1080".into(), vec![0; 4096])
+    });
+    let mut command = rig.sandbox.command(env!("CARGO_BIN_EXE_tryxctl"));
+    command
+        .arg("tui")
+        .env("TERM", "xterm-256color")
+        .env("TRYXCTL_GRAPHICS", "halfblocks");
+    let mut terminal = Terminal::spawn(command, 120, 36);
+    assert!(
+        terminal.wait_for("aurora.mp4.h264_2240x1080", Duration::from_secs(20)),
+        "{}",
+        terminal.screen()
+    );
+    assert!(
+        terminal.screen().contains("Panorama SE firmware 2.3.1"),
+        "{}",
+        terminal.screen()
+    );
+    terminal.type_keys("q");
+    let status = terminal.wait(Duration::from_secs(10)).expect("q quits");
+    assert!(status.success(), "{}", terminal.screen());
+}
