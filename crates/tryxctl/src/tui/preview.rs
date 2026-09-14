@@ -116,7 +116,7 @@ pub fn device_clip(ffmpeg: &Path, adb: &Adb, name: &str, size: u64) -> Result<Cl
             // The index sits at the end (no faststart): fetch it all, once,
             // and keep it; playback wants the whole file anyway.
             let _ = std::fs::remove_file(&part);
-            adb.pull(name, &whole).map_err(|e| e.to_string())?;
+            crate::media::pull_whole(adb, name, size, &whole).map_err(|f| f.message)?;
             rendered = render_small_clip(ffmpeg, &whole, &frames_dir);
         }
         let _ = std::fs::remove_file(&part);
@@ -142,7 +142,7 @@ pub fn device_file(adb: &Adb, name: &str, size: u64) -> Result<PathBuf, String> 
     if whole.is_file() && std::fs::metadata(&whole).map(|m| m.len()).unwrap_or(0) == size {
         return Ok(whole);
     }
-    adb.pull(name, &whole).map_err(|e| e.to_string())?;
+    crate::media::pull_whole(adb, name, size, &whole).map_err(|f| f.message)?;
     Ok(whole)
 }
 

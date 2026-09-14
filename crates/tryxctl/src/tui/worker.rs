@@ -360,9 +360,10 @@ impl WorkerState {
             Request::Upload { path, transform } => self.upload(&path, &transform, None),
             Request::Retry(id) => self.retry(&id),
             Request::ClearCache => {
-                let _ = crate::ops::clear(true, false);
+                // Not `op clear`, which prints over the interface.
+                let removed = ops::remove_kept(false);
                 self.operations();
-                self.emit(Event::Log("kept encodes removed".to_string()));
+                self.emit(Event::Log(format!("kept encodes removed ({removed})")));
                 Ok(())
             }
             Request::PushMetrics(enabled) => match &self.connection {
@@ -524,7 +525,15 @@ impl WorkerState {
         if path.exists() {
             return Err(format!("{} exists already", path.display()));
         }
-        self.adb()?.pull(name, &path).map_err(|e| e.to_string())?;
+        let adb = self.adb()?;
+        let size = adb
+            .list_media()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|file| file.name == name)
+            .map(|file| file.size)
+            .ok_or_else(|| format!("{name} is not on the display"))?;
+        media::pull_whole(adb, name, size, &path).map_err(|f| f.message)?;
         self.emit(Event::Log(format!("exported {name} to {}", path.display())));
         Ok(())
     }

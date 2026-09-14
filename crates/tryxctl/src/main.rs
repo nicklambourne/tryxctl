@@ -137,7 +137,7 @@ enum Command {
         #[arg(required = true, value_name = "NAME")]
         media: Vec<String>,
         /// Playback mode.
-        #[arg(long, value_parser = ["Single", "Loop", "Shuffle"], default_value = "Single", value_name = "MODE")]
+        #[arg(long, value_parser = ["Single", "Loop", "Shuffle"], ignore_case = true, default_value = "Single", value_name = "MODE")]
         play: String,
     },
 }

@@ -9,7 +9,7 @@ use crate::legacy::{Backend, Info, Protocol};
 use crate::metrics::{pc_info, require_linux};
 use crate::{kanali, legacy, state};
 use serde_json::json;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tryx_legacy::Client;
@@ -524,26 +524,34 @@ fn handle(owned: &mut Option<Owned>, status: &mut DaemonStatus, request: Request
 
 fn serve(listener: UnixListener, tx: Sender<Envelope>) {
     for stream in listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-        let Ok(bytes) = ipc::read_frame(&mut stream) else {
-            continue;
-        };
-        let reply = match serde_json::from_slice::<Request>(&bytes) {
-            Ok(request) => {
-                let (reply_tx, reply_rx) = mpsc::channel();
-                if tx.send((request, reply_tx)).is_err() {
-                    return;
-                }
-                reply_rx
-                    .recv()
-                    .unwrap_or_else(|_| Reply::error("daemon stopped"))
+        let Ok(stream) = stream else { continue };
+        // Each client on its own thread: one that connects and then stalls
+        // must not hold up the others. Requests still reach the display one
+        // at a time, through the main loop.
+        let tx = tx.clone();
+        std::thread::spawn(move || answer(stream, &tx));
+    }
+}
+
+fn answer(mut stream: UnixStream, tx: &Sender<Envelope>) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+    let Ok(bytes) = ipc::read_frame(&mut stream) else {
+        return;
+    };
+    let reply = match serde_json::from_slice::<Request>(&bytes) {
+        Ok(request) => {
+            let (reply_tx, reply_rx) = mpsc::channel();
+            if tx.send((request, reply_tx)).is_err() {
+                return;
             }
-            Err(error) => Reply::error(format!("bad request: {error}")),
-        };
-        if let Ok(bytes) = serde_json::to_vec(&reply) {
-            let _ = ipc::write_frame(&mut stream, &bytes);
+            reply_rx
+                .recv()
+                .unwrap_or_else(|_| Reply::error("daemon stopped"))
         }
+        Err(error) => Reply::error(format!("bad request: {error}")),
+    };
+    if let Ok(bytes) = serde_json::to_vec(&reply) {
+        let _ = ipc::write_frame(&mut stream, &bytes);
     }
 }
 
@@ -723,7 +731,9 @@ pub fn status(json: bool) -> CommandResult {
             ),
             (
                 "Showing",
-                if status.screen.media.is_empty() {
+                if !status.screen.preset_id.is_empty() {
+                    status.screen.preset_id.clone()
+                } else if status.screen.media.is_empty() {
                     "nothing".into()
                 } else {
                     status.screen.media.join(", ")

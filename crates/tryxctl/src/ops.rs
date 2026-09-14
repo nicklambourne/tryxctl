@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const KEEP: usize = 50;
@@ -99,15 +100,32 @@ fn save(records: &[Record]) -> std::io::Result<()> {
     std::fs::rename(&temp, path)
 }
 
+/// A new transfer id: twelve hex digits, distinct even for transfers one
+/// process begins within the same second, and evenly spread so that a short
+/// prefix names one.
+fn new_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seed = format!(
+        "{nanos}|{}|{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    Sha256::digest(seed.as_bytes())
+        .iter()
+        .take(6)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 /// Journals the start of a transfer.
 pub fn begin(pending: &Pending, remote: &str, target: &str) -> Record {
     let started = now_unix();
     let record = Record {
-        id: format!(
-            "{:x}",
-            (started as u64) << 16 | u64::from(std::process::id() & 0xffff)
-        )[..12]
-            .to_string(),
+        id: new_id(),
         kind: pending.kind.to_string(),
         started_unix: started,
         finished_unix: None,
@@ -274,13 +292,31 @@ pub fn ls(json: bool) -> CommandResult {
     Ok(exit::ok())
 }
 
+/// The record `id` names: its whole id, or a prefix of no other.
+fn find(records: Vec<Record>, id: &str) -> Result<Record, Failure> {
+    if id.is_empty() {
+        return Err(Failure::usage("no transfer id given; see `op ls`"));
+    }
+    if let Some(record) = records.iter().find(|record| record.id == id) {
+        return Ok(record.clone());
+    }
+    let mut matches: Vec<Record> = records
+        .into_iter()
+        .filter(|record| record.id.starts_with(id))
+        .collect();
+    match matches.len() {
+        0 => Err(Failure::usage(format!("no transfer {id}; see `op ls`"))),
+        1 => Ok(matches.remove(0)),
+        count => Err(Failure::usage(format!(
+            "{id} begins {count} transfer ids; give more of the one to retry"
+        ))),
+    }
+}
+
 /// `op retry ID`: runs a failed transfer again with the same options; the
 /// kept encode is picked up through the cache key.
 pub fn retry(json: bool, session: &legacy::Session, id: &str) -> CommandResult {
-    let record = load()
-        .into_iter()
-        .find(|record| record.id == id || record.id.starts_with(id))
-        .ok_or_else(|| Failure::usage(format!("no transfer {id}; see `op ls`")))?;
+    let record = find(load(), id)?;
     if record.outcome != Outcome::Failed {
         return Err(Failure::usage(format!(
             "transfer {} is {}; only failed ones can be retried",
@@ -321,8 +357,9 @@ pub fn retry(json: bool, session: &legacy::Session, id: &str) -> CommandResult {
     }
 }
 
-/// `op clear`: drops the kept encodes, and the journal with `--journal`.
-pub fn clear(json: bool, journal: bool) -> CommandResult {
+/// Drops the kept encodes, and the journal too when asked; returns how many
+/// encodes were removed.
+pub fn remove_kept(journal: bool) -> u64 {
     let mut removed = 0u64;
     if let Some(dir) = cache_dir()
         && let Ok(entries) = std::fs::read_dir(&dir)
@@ -341,6 +378,12 @@ pub fn clear(json: bool, journal: bool) -> CommandResult {
         records.clear();
     }
     let _ = save(&records);
+    removed
+}
+
+/// `op clear`: drops the kept encodes, and the journal with `--journal`.
+pub fn clear(json: bool, journal: bool) -> CommandResult {
+    let removed = remove_kept(journal);
     if json {
         println!(
             "{}",

@@ -223,6 +223,9 @@ pub struct SetArgs {
     /// Show temperatures in Fahrenheit.
     #[arg(long)]
     pub fahrenheit: bool,
+    /// Show temperatures in Celsius, the default.
+    #[arg(long, conflicts_with = "fahrenheit")]
+    pub celsius: bool,
     /// Which half the labels and layout apply to in split mode: left or right.
     #[arg(long, value_name = "left|right", default_value = "left")]
     pub area: String,
@@ -286,12 +289,21 @@ pub fn set(json: bool, session: &legacy::Session, args: &SetArgs) -> CommandResu
     if let Some(gpu) = &args.gpu_name {
         saved.gpu_name = Some(gpu.clone());
     }
-    let unit = if args.fahrenheit {
-        "Fahrenheit"
-    } else {
-        "Celsius"
-    };
-    saved.temperature_unit = Some(unit.to_string());
+    // Unchanged unless asked, like every other setting.
+    if args.fahrenheit || args.celsius {
+        saved.temperature_unit = Some(
+            if args.fahrenheit {
+                "Fahrenheit"
+            } else {
+                "Celsius"
+            }
+            .to_string(),
+        );
+    }
+    let unit = saved
+        .temperature_unit
+        .clone()
+        .unwrap_or_else(|| "Celsius".to_string());
     legacy::hardware_names(&mut saved);
 
     let mut connection = session.connect()?;
@@ -549,21 +561,23 @@ pub fn fans(
     watch: Option<u64>,
     lcd_speed: Option<String>,
 ) -> CommandResult {
+    let lcd_speed = lcd_speed
+        .map(|speed| {
+            if speed.eq_ignore_ascii_case("auto") {
+                return Ok(None);
+            }
+            speed
+                .parse::<u8>()
+                .ok()
+                .filter(|p| *p <= 100)
+                .map(Some)
+                .ok_or_else(|| {
+                    Failure::usage(format!("--lcd-speed {speed:?} is not 0 to 100 or auto"))
+                })
+        })
+        .transpose()?;
     let mut connection = session.connect()?;
-    if let Some(speed) = lcd_speed {
-        let fixed = if speed.eq_ignore_ascii_case("auto") {
-            None
-        } else {
-            Some(
-                speed
-                    .parse::<u8>()
-                    .ok()
-                    .filter(|p| *p <= 100)
-                    .ok_or_else(|| {
-                        Failure::usage(format!("--lcd-speed {speed:?} is not 0 to 100 or auto"))
-                    })?,
-            )
-        };
+    if let Some(fixed) = lcd_speed {
         connection.fan_lcd(fixed)?;
         let mut saved = state::load();
         saved.fan_lcd_percent = fixed;

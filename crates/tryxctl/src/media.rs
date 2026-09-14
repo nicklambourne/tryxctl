@@ -1028,22 +1028,20 @@ pub fn export(
         .iter()
         .find(|file| file.name == name)
         .ok_or_else(|| Failure::media(format!("{name} is not on the display")))?;
-    let path = output.unwrap_or_else(|| PathBuf::from(name));
+    let path = match output {
+        // Into a directory, under the name it has on the display.
+        Some(dir) if dir.is_dir() => dir.join(name),
+        Some(path) => path,
+        None => PathBuf::from(name),
+    };
     if path.exists() && !force {
         return Err(Failure::media(format!(
             "{} exists; pass --force to overwrite it",
             path.display()
         )));
     }
-    adb.pull(name, &path)?;
-    let size = std::fs::metadata(&path)?.len();
-    if size != entry.size {
-        let _ = std::fs::remove_file(&path);
-        return Err(Failure::device(format!(
-            "pulled {} of {} bytes; the copy was removed",
-            size, entry.size
-        )));
-    }
+    pull_whole(&adb, name, entry.size, &path)?;
+    let size = entry.size;
     let sha256 = encode::sha256_file(&path)?;
     if json {
         println!(
@@ -1064,6 +1062,20 @@ pub fn export(
         );
     }
     Ok(exit::ok())
+}
+
+/// Pulls `name` to `path` and checks that the copy is whole; a short copy is
+/// removed rather than left to pass for the file.
+pub fn pull_whole(adb: &Adb, name: &str, size: u64, path: &Path) -> Result<(), Failure> {
+    adb.pull(name, path)?;
+    let pulled = std::fs::metadata(path)?.len();
+    if pulled != size {
+        let _ = std::fs::remove_file(path);
+        return Err(Failure::device(format!(
+            "pulled {pulled} of {size} bytes; the copy was removed"
+        )));
+    }
+    Ok(())
 }
 
 /// `media replace`: a new file under an existing name. The prepared file is
