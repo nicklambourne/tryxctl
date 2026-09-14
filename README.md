@@ -1,3 +1,5 @@
+<img src="docs/images/logo.svg" alt="The tryxctl logo: the Panorama SE's curved screen, drawn in white, with green code falling across it" width="140">
+
 # tryxctl
 
 Command-line and terminal-UI controller for TRYX cooler displays (Panorama SE,
