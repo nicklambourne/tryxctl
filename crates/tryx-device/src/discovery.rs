@@ -9,6 +9,7 @@ use crate::product::{Product, ROCKCHIP_GADGET_PRODUCT_ID, VENDOR_ID};
 use rusb::UsbContext;
 use serde::Serialize;
 use std::fmt;
+use std::path::PathBuf;
 
 /// Vendor ID (Google's Android Open Accessory range) used by the legacy firmware.
 pub const LEGACY_VENDOR_ID: u16 = 0x18d1;
@@ -19,11 +20,11 @@ const PRINTER_INTERFACE_CLASS: u8 = 0x07;
 const PRINTER_INTERFACE_SUBCLASS: u8 = 0x01;
 const PRINTER_INTERFACE_PROTOCOL: u8 = 0x02;
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const ADB_INTERFACE_CLASS: u8 = 0xff;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const ADB_INTERFACE_SUBCLASS: u8 = 0x42;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const ADB_INTERFACE_PROTOCOL: u8 = 0x01;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -136,14 +137,61 @@ pub enum DiscoveryError {
     Usb(#[from] rusb::Error),
 }
 
+/// Names a directory to read in place of `/sys/bus/usb/devices`. Tests
+/// point it at a fake device tree; while it is set, libusb enumeration is
+/// skipped as well, so a test never sees the hardware of the host it runs on.
+pub const SYSFS_OVERRIDE: &str = "TRYXCTL_SYSFS_USB_DEVICES";
+/// Names the directory of device nodes to use with [`SYSFS_OVERRIDE`], in
+/// place of `/dev`.
+pub const DEV_OVERRIDE: &str = "TRYXCTL_DEV_DIR";
+
+/// Where legacy displays are looked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SysfsRoots {
+    /// The USB device directory: `/sys/bus/usb/devices` on Linux.
+    pub devices: PathBuf,
+    /// The directory holding device nodes: `/dev`.
+    pub dev: PathBuf,
+}
+
+fn absolute_env(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+impl SysfsRoots {
+    /// The overrides when [`SYSFS_OVERRIDE`] is set, the Linux defaults
+    /// otherwise, and `None` on hosts without sysfs.
+    pub fn from_env() -> Option<SysfsRoots> {
+        match absolute_env(SYSFS_OVERRIDE) {
+            Some(devices) => Some(SysfsRoots {
+                devices,
+                dev: absolute_env(DEV_OVERRIDE).unwrap_or_else(|| PathBuf::from("/dev")),
+            }),
+            None if cfg!(target_os = "linux") => Some(SysfsRoots {
+                devices: PathBuf::from("/sys/bus/usb/devices"),
+                dev: PathBuf::from("/dev"),
+            }),
+            None => None,
+        }
+    }
+}
+
 pub fn discover() -> Result<Discovery, DiscoveryError> {
-    let (printer_devices, usb_error) = match printer_devices() {
-        Ok(devices) => (devices, None),
-        Err(error) => (Vec::new(), Some(error.to_string())),
+    let (printer_devices, usb_error) = if absolute_env(SYSFS_OVERRIDE).is_some() {
+        (Vec::new(), None)
+    } else {
+        match printer_devices() {
+            Ok(devices) => (devices, None),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        }
     };
     Ok(Discovery {
         printer_devices,
-        legacy_devices: legacy_devices(),
+        legacy_devices: SysfsRoots::from_env()
+            .map(|roots| legacy_devices_in(&roots))
+            .unwrap_or_default(),
         usb_error,
     })
 }
@@ -326,11 +374,12 @@ pub fn find_printer_interface(config: &rusb::ConfigDescriptor) -> InterfaceStatu
     }
 }
 
-#[cfg(target_os = "linux")]
-fn legacy_devices() -> Vec<LegacyDevice> {
+/// The legacy displays in a sysfs USB device tree.
+#[cfg(unix)]
+pub fn legacy_devices_in(roots: &SysfsRoots) -> Vec<LegacyDevice> {
     use std::path::Path;
 
-    let Ok(entries) = std::fs::read_dir(sysfs::ROOT) else {
+    let Ok(entries) = std::fs::read_dir(&roots.devices) else {
         return Vec::new();
     };
     let mut found = Vec::new();
@@ -362,7 +411,7 @@ fn legacy_devices() -> Vec<LegacyDevice> {
                 }
                 _ => {
                     if tty.is_none() {
-                        tty = sysfs::tty_node(&interface);
+                        tty = sysfs::tty_node(&interface, &roots.dev);
                     }
                 }
             }
@@ -384,14 +433,14 @@ fn legacy_devices() -> Vec<LegacyDevice> {
     found
 }
 
-#[cfg(not(target_os = "linux"))]
-fn legacy_devices() -> Vec<LegacyDevice> {
+#[cfg(not(unix))]
+pub fn legacy_devices_in(_roots: &SysfsRoots) -> Vec<LegacyDevice> {
     Vec::new()
 }
 
 /// Read/write permission on a device node, checked without opening it so a
 /// listing never toggles a serial port's control lines.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn path_access(path: &std::path::Path) -> Access {
     use nix::unistd::{AccessFlags, access};
 
@@ -404,11 +453,9 @@ fn path_access(path: &std::path::Path) -> Access {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod sysfs {
     use std::path::{Path, PathBuf};
-
-    pub const ROOT: &str = "/sys/bus/usb/devices";
 
     pub fn read_attr(device: &Path, name: &str) -> Option<String> {
         let value = std::fs::read_to_string(device.join(name)).ok()?;
@@ -450,12 +497,13 @@ mod sysfs {
         ))
     }
 
-    pub fn tty_node(interface: &Path) -> Option<String> {
+    /// The device node of the first tty under an interface, in `dev`.
+    pub fn tty_node(interface: &Path, dev: &Path) -> Option<String> {
         let entry = std::fs::read_dir(interface.join("tty"))
             .ok()?
             .flatten()
             .next()?;
-        Some(format!("/dev/{}", entry.file_name().to_string_lossy()))
+        Some(dev.join(entry.file_name()).to_string_lossy().into_owned())
     }
 }
 
@@ -481,6 +529,176 @@ mod tests {
         assert_eq!(parse_sysfs_name("usb3"), None);
         assert_eq!(parse_sysfs_name("3-12:1.0"), None);
         assert_eq!(parse_sysfs_name("3-"), None);
+    }
+
+    /// A sysfs USB device tree and device-node directory under a temporary
+    /// directory, removed when dropped.
+    #[cfg(unix)]
+    struct FakeTree {
+        root: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl FakeTree {
+        fn new(tag: &str) -> FakeTree {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir()
+                .join(format!("tryx-device-{tag}-{}-{nanos}", std::process::id()));
+            std::fs::create_dir_all(root.join("devices")).unwrap();
+            std::fs::create_dir_all(root.join("dev")).unwrap();
+            FakeTree { root }
+        }
+
+        fn roots(&self) -> SysfsRoots {
+            SysfsRoots {
+                devices: self.root.join("devices"),
+                dev: self.root.join("dev"),
+            }
+        }
+
+        fn write(&self, relative: &str, name: &str, value: &str) {
+            let dir = self.root.join("devices").join(relative);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(name), format!("{value}\n")).unwrap();
+        }
+
+        fn interface(&self, device: &str, number: u8, class: (u8, u8, u8)) -> String {
+            let relative = format!("{device}/{device}:1.{number}");
+            self.write(&relative, "bInterfaceClass", &format!("{:02x}", class.0));
+            self.write(&relative, "bInterfaceSubClass", &format!("{:02x}", class.1));
+            self.write(&relative, "bInterfaceProtocol", &format!("{:02x}", class.2));
+            relative
+        }
+
+        /// A cm01 display at `name`, with a CDC ACM port named `tty` and an
+        /// ADB interface when asked.
+        fn display(&self, name: &str, serial: Option<&str>, tty: Option<&str>, adb: bool) {
+            self.write(name, "idVendor", "18d1");
+            self.write(name, "idProduct", "2d04");
+            self.write(name, "product", "cm01_se");
+            self.write(name, "manufacturer", "rockchip");
+            self.write(name, "devnum", "4");
+            if let Some(serial) = serial {
+                self.write(name, "serial", serial);
+            }
+            let control = self.interface(name, 0, (0x02, 0x02, 0x01));
+            if let Some(tty) = tty {
+                let node = self
+                    .root
+                    .join("devices")
+                    .join(&control)
+                    .join("tty")
+                    .join(tty);
+                std::fs::create_dir_all(node).unwrap();
+                std::fs::write(self.root.join("dev").join(tty), b"").unwrap();
+            }
+            if adb {
+                self.interface(name, 2, (0xff, 0x42, 0x01));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FakeTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn finds_a_legacy_display_with_its_port_and_adb_interface() {
+        let tree = FakeTree::new("found");
+        tree.display("3-12", Some("XYZ000000000000001"), Some("ttyACM0"), true);
+        let devices = legacy_devices_in(&tree.roots());
+        assert_eq!(devices.len(), 1, "{devices:?}");
+        let device = &devices[0];
+        assert_eq!(device.id, "usb:003-12");
+        assert_eq!(device.usb_id, "18d1:2d04");
+        assert_eq!(device.product_string, "cm01_se");
+        assert_eq!(device.manufacturer.as_deref(), Some("rockchip"));
+        assert_eq!(device.serial.as_deref(), Some("XYZ000000000000001"));
+        let expected_tty = tree.root.join("dev/ttyACM0").to_string_lossy().into_owned();
+        assert_eq!(device.tty.as_deref(), Some(expected_tty.as_str()));
+        assert!(device.adb_interface);
+        assert!(
+            device.sysfs_path.ends_with("/3-12"),
+            "{}",
+            device.sysfs_path
+        );
+        if !nix::unistd::geteuid().is_root() {
+            assert_eq!(device.tty_access, Some(Access::Accessible));
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn skips_other_vendors_other_products_and_interface_entries() {
+        let tree = FakeTree::new("skips");
+        tree.write("1-1", "idVendor", "1d6b");
+        tree.write("1-1", "product", "cm01 lookalike hub");
+        tree.write("1-2", "idVendor", "18d1");
+        tree.write("1-2", "product", "Pixel 9");
+        tree.write("1-3", "idVendor", "18d1");
+        tree.write("usb1", "idVendor", "18d1");
+        tree.write("usb1", "product", "cm01_se");
+        tree.write("3-12:1.0", "idVendor", "18d1");
+        tree.write("3-12:1.0", "product", "cm01_se");
+        assert!(legacy_devices_in(&tree.roots()).is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_display_without_a_port_or_adb_is_still_listed() {
+        let tree = FakeTree::new("bare");
+        tree.display("2-4", None, None, false);
+        let devices = legacy_devices_in(&tree.roots());
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].tty, None);
+        assert_eq!(devices[0].tty_access, None);
+        assert_eq!(devices[0].serial, None);
+        assert!(!devices[0].adb_interface);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_port_without_permission_is_reported() {
+        if nix::unistd::geteuid().is_root() {
+            return; // root can open anything
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let tree = FakeTree::new("denied");
+        tree.display("3-12", Some("A"), Some("ttyACM0"), true);
+        let node = tree.root.join("dev/ttyACM0");
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let devices = legacy_devices_in(&tree.roots());
+        assert_eq!(devices[0].tty_access, Some(Access::PermissionDenied));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn several_displays_come_back_sorted_by_id() {
+        let tree = FakeTree::new("several");
+        tree.display("3-12", Some("B"), Some("ttyACM1"), true);
+        tree.display("1-2.3", Some("A"), Some("ttyACM0"), true);
+        let ids: Vec<String> = legacy_devices_in(&tree.roots())
+            .into_iter()
+            .map(|device| device.id)
+            .collect();
+        assert_eq!(ids, ["usb:001-2.3", "usb:003-12"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_missing_tree_finds_nothing() {
+        let roots = SysfsRoots {
+            devices: std::path::PathBuf::from("/nonexistent/tryx/devices"),
+            dev: std::path::PathBuf::from("/nonexistent/tryx/dev"),
+        };
+        assert!(legacy_devices_in(&roots).is_empty());
     }
 
     #[test]

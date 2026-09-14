@@ -11,8 +11,8 @@ rusb = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.30", features = ["fs"] }
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", features = ["fs", "user"] }
 
 [features]
 # Build libusb from source and link it statically, for musl releases.
