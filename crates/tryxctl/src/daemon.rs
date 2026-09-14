@@ -220,7 +220,9 @@ pub fn run(session: &legacy::Session, interval: u64, quiet: bool) -> CommandResu
                             }
                             next_keepalive = now + tryx_kanali::KEEPALIVE_INTERVAL;
                         }
-                        if now >= next_push {
+                        // A link the keepalive found dead is not pushed to,
+                        // which would also clear the error that says why.
+                        if !lost && now >= next_push {
                             match push(current, &mut status, &mut monitor, quiet) {
                                 Ok(()) => silent_pushes = 0,
                                 Err(dead) => {
