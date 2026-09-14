@@ -73,22 +73,46 @@ cargo run --quiet -- doctor
 nix build .#tryxctl
 ```
 
+The tests also run on aarch64, and a coverage job fails when line coverage
+drops below its floor; `cargo llvm-cov --workspace --all-targets` measures it
+locally. CI sets `TRYXCTL_REQUIRE_FFMPEG=1`, which turns a test that would skip
+for want of ffmpeg into a failure.
+
 With no display attached, `doctor` still passes, with warnings. It exits with
 code 4 only when something it needs is missing, such as `ffmpeg` or its
-`libx264` encoder. The nix package builds on Linux only. A few tests exercise Linux
-serial ports and sysfs, so they are compiled only there; CI runs them on
-Ubuntu.
+`libx264` encoder. The nix package builds on Linux only.
 
 ### Testing without hardware
 
+Nothing in the test suite needs a display, and nothing in it touches the
+host's: every run of the binary happens in a sandbox with its own XDG
+directories, temporary directory, `PATH`, and USB device tree.
+
+- `crates/tryx-testkit` holds the doubles. `FakeCm01` answers the legacy
+  protocol on a pseudo-terminal and records every request; `FakeAdb` is a
+  shell script serving the display's media directory; `FakeKanali` speaks the
+  KANALI protocol on a socket; `Sandbox` builds the environment around them.
+  `TRYX_TESTKIT_KEEP=1` keeps sandboxes after a test, for a look inside.
+- `TRYXCTL_SYSFS_USB_DEVICES` and `TRYXCTL_DEV_DIR` point discovery at a
+  device tree in place of `/sys/bus/usb/devices` and `/dev`. While they are
+  set, KANALI displays come from that tree too, reached over a socket in their
+  device directory instead of USB.
+- `crates/tryxctl/tests/` runs the built binary against the fakes: the command
+  line, the daemon, the interface on a pseudo-terminal, and both firmware
+  families. The interface's device thread is tested in process in
+  `src/tui/worker.rs`, each test in its own sandboxed process.
+- The KANALI session is also tested below the command line, against a
+  scripted device in `crates/tryx-kanali/tests/fake_device.rs`. Extend both
+  fakes when you change the protocol.
 - The legacy protocol tests decode frames captured from a real Panorama SE,
   kept as fixtures next to the codec in `crates/tryx-legacy/src/frame.rs`.
-- The KANALI backend is exercised end to end against a scripted fake device
-  in `crates/tryx-kanali/tests/fake_device.rs`. Extend the script when you
-  change the protocol.
 - Media checks and plans are tested against real ffprobe output in
-  `crates/tryx-media/tests/fixtures/`.
-- `crates/tryxctl/tests/cli.rs` runs the built binary.
+  `crates/tryx-media/tests/fixtures/`, and the codecs and parsers with
+  property tests in each crate's `tests/properties.rs`.
+
+Linux runs everything. Opening a pseudo-terminal as a serial port and the
+daemon work only there, so those tests are compiled on Linux alone; the rest
+run on macOS too.
 
 If you change behaviour that only a display can confirm, say in the pull
 request what you verified on hardware, and on which model and firmware.
@@ -104,6 +128,7 @@ request what you verified on hardware, and on which model and firmware.
 | `crates/tryx-proto` | The KANALI frame codec and its protobuf messages |
 | `crates/tryx-media` | Probing, validation, conversion plans, encoding, and the MXHD container |
 | `crates/tryx-monitor` | Host metrics for the overlay: CPU, GPU, memory, and disk |
+| `crates/tryx-testkit` | Test doubles: fake displays of both firmware families, a fake adb, and sandboxes; never published |
 
 ## Making a change
 

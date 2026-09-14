@@ -12,9 +12,39 @@ so any release before 1.0 may change behaviour.
 - A disclaimer, a key reference for the interface, troubleshooting, the files
   the tool writes, and uninstall steps in the README, with screenshots.
 - A contributing guide and this changelog.
+- `metrics set --celsius`, to go back from `--fahrenheit`.
+- End-to-end tests against fake displays of both firmware families, a fake
+  adb, and the daemon, with property tests for the codecs and parsers.
+
+### Changed
+
+- `metrics set` keeps the temperature unit it was last given instead of
+  resetting it to Celsius.
 
 ### Fixed
 
+- With the daemon running, a command given `--tty` or `--device` for another
+  display acted on the daemon's display instead.
+- adb could pick another Android device, such as a phone, when the display's
+  own transport was missing, and media commands on a port with no display
+  behind it guessed at one.
+- Two transfers begun within the same second by one process, as the interface
+  can, shared an id and overwrote each other's journal record.
+- `op retry` with an empty or ambiguous id retried the oldest match; it now
+  needs a whole id or a unique prefix.
+- `media export -o DIR` failed instead of writing into the directory.
+- Exports from the interface, and the copies behind previews and playback,
+  were not checked for completeness.
+- Clearing kept encodes in the interface printed over the screen.
+- `fans --lcd-speed` opened the display before checking its value.
+- `show --play` was case-sensitive, unlike every other choice.
+- The daemon served one client at a time, so one that stalled held up every
+  other command.
+- `daemon status` showed the old media while a preset played, and lost the
+  reason when a KANALI display went away.
+- A KANALI reply that arrived in the same read as stray bytes was discarded
+  with them, and the command timed out.
+- Long file names could end in a dash or a dot after shortening.
 - `THIRD_PARTY.md` reproduces the upstream MIT notices in full, and the files
   copied from upstream carry their copyright lines.
 
