@@ -159,6 +159,12 @@ impl Session {
         let deadline = Instant::now() + timeout;
         let mut chunk = vec![0u8; READ_BUFFER];
         loop {
+            // Garbage goes first: the codec clears the whole buffer at a bad
+            // header, which would also lose a good frame read along with it.
+            let dropped = frame::discard_bytes_before_plausible_frame(&mut self.pending);
+            if dropped > 0 && self.trace {
+                eprintln!("   dropping {dropped} bytes of malformed input");
+            }
             match frame::take_frame(&mut self.pending) {
                 Ok(Some(payload)) => return Ok(payload),
                 Ok(None) => {}
@@ -166,7 +172,6 @@ impl Session {
                     if self.trace {
                         eprintln!("   dropping malformed input: {malformed}");
                     }
-                    frame::discard_bytes_before_plausible_frame(&mut self.pending);
                 }
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
