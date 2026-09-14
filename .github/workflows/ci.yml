@@ -35,10 +35,60 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
 
       - run: cargo test --all-targets
+        env:
+          # Without it, tests that need ffmpeg say they skipped and pass.
+          TRYXCTL_REQUIRE_FFMPEG: "1"
 
       # Smoke test: Ubuntu's ffmpeg carries libx264 and no device is attached,
       # so doctor must pass with warnings only.
       - run: cargo run --quiet -- doctor
+
+  test-aarch64:
+    # The aarch64 release is built on this runner; its tests run here too.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg libusb-1.0-0-dev pkg-config protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo test --all-targets
+        env:
+          TRYXCTL_REQUIRE_FFMPEG: "1"
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg libusb-1.0-0-dev pkg-config protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      # A floor, so coverage cannot quietly fall. The daemon's own lines are
+      # under-counted: its tests end it with a kill, which writes no profile.
+      - run: cargo llvm-cov --workspace --all-targets --summary-only --fail-under-lines 80
+        env:
+          TRYXCTL_REQUIRE_FFMPEG: "1"
 
   nix:
     # The flake package must keep building; GitHub-hosted like everything else.
