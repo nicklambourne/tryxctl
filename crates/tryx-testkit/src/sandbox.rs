@@ -158,6 +158,18 @@ impl Sandbox {
         self.point(tty, node);
     }
 
+    /// Lists a KANALI display of USB product `product_id` in the device tree
+    /// under sysfs name `name`, and returns the socket where
+    /// [`crate::FakeKanali`] must answer for it.
+    pub fn plug_kanali(&self, name: &str, product_id: u16, serial: &str) -> PathBuf {
+        self.write(name, "idVendor", "391a");
+        self.write(name, "idProduct", &format!("{product_id:04x}"));
+        self.write(name, "manufacturer", "TRYX");
+        self.write(name, "serial", serial);
+        self.write(name, "devnum", "9");
+        self.root.join("sys").join(name).join("socket")
+    }
+
     /// Points the device node of `tty` at `node`, as a replugged display
     /// that came back on a different pseudo-terminal.
     #[cfg(unix)]

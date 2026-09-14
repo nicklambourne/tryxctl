@@ -2115,8 +2115,10 @@ name = "tryx-testkit"
 version = "0.3.0"
 dependencies = [
  "libc",
+ "prost",
  "serde_json",
  "serialport",
+ "tryx-proto",
  "vt100",
 ]
 

@@ -12,5 +12,7 @@ serde_json = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+prost = { workspace = true }
 serialport = { version = "4", default-features = false }
+tryx-proto = { path = "../tryx-proto" }
 vt100 = "0.15"
