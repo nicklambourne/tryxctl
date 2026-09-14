@@ -2114,7 +2114,7 @@ dependencies = [
 
 [[package]]
 name = "tryx-device"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nix 0.30.1",
  "rusb",
@@ -2124,7 +2124,7 @@ dependencies = [
 
 [[package]]
 name = "tryx-kanali"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "libc",
  "prost",
@@ -2137,7 +2137,7 @@ dependencies = [
 
 [[package]]
 name = "tryx-legacy"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "libc",
  "proptest",
@@ -2151,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "tryx-media"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "proptest",
  "serde",
@@ -2164,7 +2164,7 @@ dependencies = [
 
 [[package]]
 name = "tryx-monitor"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "nix 0.30.1",
  "serde",
@@ -2173,7 +2173,7 @@ dependencies = [
 
 [[package]]
 name = "tryx-proto"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "proptest",
  "prost",
@@ -2183,7 +2183,7 @@ dependencies = [
 
 [[package]]
 name = "tryx-testkit"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "libc",
  "prost",
@@ -2195,7 +2195,7 @@ dependencies = [
 
 [[package]]
 name = "tryxctl"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "base64",
