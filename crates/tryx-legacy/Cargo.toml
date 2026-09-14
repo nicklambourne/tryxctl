@@ -13,3 +13,6 @@ serde_json = { workspace = true }
 serialport = { version = "4", default-features = false }
 thiserror = { workspace = true }
 which = { workspace = true }
+
+[dev-dependencies]
+tryx-testkit = { path = "../tryx-testkit" }
