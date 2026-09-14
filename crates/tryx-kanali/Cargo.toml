@@ -13,3 +13,6 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 tryx-device = { path = "../tryx-device" }
 tryx-proto = { path = "../tryx-proto" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

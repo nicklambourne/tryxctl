@@ -84,6 +84,34 @@ impl UsbPipe {
     }
 }
 
+/// The socket of a display in a device tree supplied for tests, standing in
+/// for its USB pipe; `None` unless such a tree is supplied.
+pub fn open_supplied(
+    id: &str,
+) -> Option<Result<(Product, std::os::unix::net::UnixStream), TransportError>> {
+    let roots = discovery::SysfsRoots::overridden()?;
+    let device = discovery::printer_devices_in(&roots)
+        .into_iter()
+        .find(|device| device.id == id);
+    Some(
+        device
+            .ok_or_else(|| {
+                TransportError::NotFound(format!("no printer-class display with id {id}"))
+            })
+            .and_then(|device| {
+                let product = device.product.ok_or_else(|| {
+                    TransportError::NotFound(format!("{id} is not a supported product"))
+                })?;
+                let socket = std::path::Path::new(device.sysfs_path.as_deref().unwrap_or_default())
+                    .join(discovery::SUPPLIED_SOCKET);
+                let stream = std::os::unix::net::UnixStream::connect(&socket).map_err(|error| {
+                    TransportError::Io(format!("{}: {error}", socket.display()))
+                })?;
+                Ok((product, stream))
+            }),
+    )
+}
+
 impl Drop for UsbPipe {
     fn drop(&mut self) {
         let _ = self.handle.release_interface(self.interface.number);
@@ -115,12 +143,34 @@ impl Pipe for UsbPipe {
     }
 }
 
+/// Writes to a socket without raising SIGPIPE when the peer has gone:
+/// tryxctl restores that signal's default action, which would end the
+/// process where a USB pipe reports a disconnected device.
+#[cfg(target_os = "linux")]
+fn send(stream: &std::os::unix::net::UnixStream, data: &[u8]) -> std::io::Result<usize> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the buffer is valid for its length and the descriptor is open.
+    let sent = unsafe {
+        libc::send(
+            stream.as_raw_fd(),
+            data.as_ptr().cast(),
+            data.len(),
+            libc::MSG_NOSIGNAL,
+        )
+    };
+    usize::try_from(sent).map_err(|_| std::io::Error::last_os_error())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn send(mut stream: &std::os::unix::net::UnixStream, data: &[u8]) -> std::io::Result<usize> {
+    std::io::Write::write(&mut stream, data)
+}
+
 impl Pipe for std::os::unix::net::UnixStream {
     fn write(&mut self, data: &[u8], timeout: Duration) -> Result<usize, TransportError> {
-        use std::io::Write;
         self.set_write_timeout(Some(timeout))
             .map_err(|e| TransportError::Io(e.to_string()))?;
-        match Write::write(self, data) {
+        match send(self, data) {
             Ok(n) => Ok(n),
             Err(e)
                 if matches!(

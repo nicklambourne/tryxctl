@@ -138,8 +138,9 @@ pub enum DiscoveryError {
 }
 
 /// Names a directory to read in place of `/sys/bus/usb/devices`. Tests
-/// point it at a fake device tree; while it is set, libusb enumeration is
-/// skipped as well, so a test never sees the hardware of the host it runs on.
+/// point it at a fake device tree. While it is set, printer-class displays
+/// come from that tree too instead of libusb, so a test never sees the
+/// hardware of the host it runs on.
 pub const SYSFS_OVERRIDE: &str = "TRYXCTL_SYSFS_USB_DEVICES";
 /// Names the directory of device nodes to use with [`SYSFS_OVERRIDE`], in
 /// place of `/dev`.
@@ -161,31 +162,33 @@ fn absolute_env(name: &str) -> Option<PathBuf> {
 }
 
 impl SysfsRoots {
-    /// The overrides when [`SYSFS_OVERRIDE`] is set, the Linux defaults
-    /// otherwise, and `None` on hosts without sysfs.
+    /// The supplied tree, while [`SYSFS_OVERRIDE`] is set.
+    pub fn overridden() -> Option<SysfsRoots> {
+        absolute_env(SYSFS_OVERRIDE).map(|devices| SysfsRoots {
+            devices,
+            dev: absolute_env(DEV_OVERRIDE).unwrap_or_else(|| PathBuf::from("/dev")),
+        })
+    }
+
+    /// The supplied tree when there is one, the Linux defaults otherwise,
+    /// and `None` on hosts without sysfs.
     pub fn from_env() -> Option<SysfsRoots> {
-        match absolute_env(SYSFS_OVERRIDE) {
-            Some(devices) => Some(SysfsRoots {
-                devices,
-                dev: absolute_env(DEV_OVERRIDE).unwrap_or_else(|| PathBuf::from("/dev")),
-            }),
-            None if cfg!(target_os = "linux") => Some(SysfsRoots {
+        SysfsRoots::overridden().or_else(|| {
+            cfg!(target_os = "linux").then(|| SysfsRoots {
                 devices: PathBuf::from("/sys/bus/usb/devices"),
                 dev: PathBuf::from("/dev"),
-            }),
-            None => None,
-        }
+            })
+        })
     }
 }
 
 pub fn discover() -> Result<Discovery, DiscoveryError> {
-    let (printer_devices, usb_error) = if absolute_env(SYSFS_OVERRIDE).is_some() {
-        (Vec::new(), None)
-    } else {
-        match printer_devices() {
+    let (printer_devices, usb_error) = match SysfsRoots::overridden() {
+        Some(roots) => (printer_devices_in(&roots), None),
+        None => match printer_devices() {
             Ok(devices) => (devices, None),
             Err(error) => (Vec::new(), Some(error.to_string())),
-        }
+        },
     };
     Ok(Discovery {
         printer_devices,
@@ -372,6 +375,63 @@ pub fn find_printer_interface(config: &rusb::ConfigDescriptor) -> InterfaceStatu
         },
         count => InterfaceStatus::Ambiguous { count },
     }
+}
+
+/// The name of the socket that carries a supplied printer-class display's
+/// protocol in place of its USB pipe.
+pub const SUPPLIED_SOCKET: &str = "socket";
+
+/// The printer-class displays in a device tree supplied for tests. Each has
+/// the printer interface and is accessible when its [`SUPPLIED_SOCKET`] is.
+#[cfg(unix)]
+pub fn printer_devices_in(roots: &SysfsRoots) -> Vec<PrinterDevice> {
+    use std::path::Path;
+
+    let Ok(entries) = std::fs::read_dir(&roots.devices) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some((bus, ports)) = parse_sysfs_name(&name) else {
+            continue;
+        };
+        if sysfs::read_hex_u16(&path, "idVendor") != Some(VENDOR_ID) {
+            continue;
+        }
+        let product_id = sysfs::read_hex_u16(&path, "idProduct").unwrap_or(0);
+        let address = sysfs::read_attr(&path, "devnum")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        found.push(PrinterDevice {
+            id: stable_id(bus, &ports, address),
+            sysfs_path: Some(path.to_string_lossy().into_owned()),
+            usb_id: format!("{VENDOR_ID:04x}:{product_id:04x}"),
+            product_id,
+            product: Product::from_product_id(product_id),
+            transitional: product_id == ROCKCHIP_GADGET_PRODUCT_ID,
+            manufacturer: sysfs::read_attr(&path, "manufacturer"),
+            product_string: sysfs::read_attr(&path, "product"),
+            serial: sysfs::read_attr(&path, "serial"),
+            access: path_access(&Path::new(&path).join(SUPPLIED_SOCKET)),
+            interface: InterfaceStatus::Found {
+                interface: PrinterInterface {
+                    number: 0,
+                    alternate_setting: 0,
+                    bulk_in: 0x81,
+                    bulk_out: 0x01,
+                },
+            },
+        });
+    }
+    found.sort_by(|a, b| a.id.cmp(&b.id));
+    found
+}
+
+#[cfg(not(unix))]
+pub fn printer_devices_in(_roots: &SysfsRoots) -> Vec<PrinterDevice> {
+    Vec::new()
 }
 
 /// The legacy displays in a sysfs USB device tree.
@@ -693,12 +753,46 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn supplied_printer_displays_are_listed_with_their_products() {
+        let tree = FakeTree::new("printers");
+        for (name, product, serial) in [("3-4", "1021", "SE-1"), ("1-1", "0006", "")] {
+            tree.write(name, "idVendor", "391a");
+            tree.write(name, "idProduct", product);
+            tree.write(name, "devnum", "7");
+            if !serial.is_empty() {
+                tree.write(name, "serial", serial);
+            }
+        }
+        std::fs::write(tree.root.join("devices/3-4").join(SUPPLIED_SOCKET), b"").unwrap();
+        tree.display("3-12", Some("LEGACY"), Some("ttyACM0"), true);
+        let roots = tree.roots();
+        let printers = printer_devices_in(&roots);
+        assert_eq!(printers.len(), 2, "{printers:?}");
+        let gadget = &printers[0];
+        assert_eq!(gadget.id, "usb:001-1");
+        assert!(gadget.transitional);
+        assert_eq!(gadget.product, None);
+        assert!(matches!(gadget.access, Access::Error { .. }), "no socket");
+        let panorama = &printers[1];
+        assert_eq!(panorama.id, "usb:003-4");
+        assert_eq!(panorama.usb_id, "391a:1021");
+        assert_eq!(panorama.product, Some(Product::PanoramaSe));
+        assert_eq!(panorama.serial.as_deref(), Some("SE-1"));
+        assert_eq!(panorama.access, Access::Accessible);
+        assert!(matches!(panorama.interface, InterfaceStatus::Found { .. }));
+        // Each kind of display is found by its own walk only.
+        assert_eq!(legacy_devices_in(&roots).len(), 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_missing_tree_finds_nothing() {
         let roots = SysfsRoots {
             devices: std::path::PathBuf::from("/nonexistent/tryx/devices"),
             dev: std::path::PathBuf::from("/nonexistent/tryx/dev"),
         };
         assert!(legacy_devices_in(&roots).is_empty());
+        assert!(printer_devices_in(&roots).is_empty());
     }
 
     #[test]

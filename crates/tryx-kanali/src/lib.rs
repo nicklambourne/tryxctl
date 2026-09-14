@@ -145,6 +145,10 @@ impl Device {
     /// Opens the printer-class interface of the device with this discovery
     /// id, e.g. `usb:003-12`.
     pub fn open(id: &str) -> Result<Device, KanaliError> {
+        if let Some(supplied) = transport::open_supplied(id) {
+            let (product, stream) = supplied?;
+            return Ok(Device::from_pipe(product, Box::new(stream)));
+        }
         let (product, pipe) = transport::UsbPipe::open(id)?;
         Ok(Device::from_pipe(product, Box::new(pipe)))
     }
