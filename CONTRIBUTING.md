@@ -86,7 +86,7 @@ code 4 only when something it needs is missing, such as `ffmpeg` or its
 
 Nothing in the test suite needs a display, and nothing in it touches the
 host's: every run of the binary happens in a sandbox with its own XDG
-directories, temporary directory, `PATH`, and USB device tree.
+directories, temporary directory, `PATH`, USB device tree, and os-release.
 
 - `crates/tryx-testkit` holds the doubles. `FakeCm01` answers the legacy
   protocol on a pseudo-terminal and records every request; `FakeAdb` is a
@@ -97,6 +97,8 @@ directories, temporary directory, `PATH`, and USB device tree.
   device tree in place of `/sys/bus/usb/devices` and `/dev`. While they are
   set, KANALI displays come from that tree too, reached over a socket in their
   device directory instead of USB.
+- `TRYXCTL_OS_RELEASE` names the os-release file `doctor` reads in place of
+  `/etc/os-release`, so the distribution its hints are for is the test's.
 - `crates/tryxctl/tests/` runs the built binary against the fakes: the command
   line, the daemon, the interface on a pseudo-terminal, and both firmware
   families. The interface's device thread is tested in process in

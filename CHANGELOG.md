@@ -7,6 +7,15 @@ so any release before 1.0 may change behaviour.
 
 ## [Unreleased]
 
+### Added
+
+- `tryxctl doctor` recognises Debian, Ubuntu, Fedora, Arch, openSUSE, NixOS,
+  and their derivatives. Its hints give that distribution's commands for
+  installing ffmpeg and adb, installing the udev rules, and joining the device
+  groups, creating a group the system lacks, with one step per line.
+- Install steps in the README for the dependencies and the device groups on
+  those distributions.
+
 ## [0.3.1] - 2026-09-15
 
 ### Added

@@ -86,6 +86,113 @@ fn doctor_fails_without_ffmpeg() {
 }
 
 #[test]
+fn doctor_hints_give_the_distribution_s_commands() {
+    // Runs doctor with nothing on PATH, so ffmpeg and adb are missing.
+    let doctor = |os_release: Option<&str>, args: &[&str]| {
+        let sandbox = Sandbox::new();
+        if let Some(contents) = os_release {
+            std::fs::write(sandbox.os_release(), contents).unwrap();
+        }
+        let mut command = sandbox.command(env!("CARGO_BIN_EXE_tryxctl"));
+        command.args(args).env("PATH", sandbox.bin());
+        let output = tryx_testkit::sandbox::output(command);
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let checks = |os_release: Option<&str>| {
+        let json: serde_json::Value =
+            serde_json::from_str(&doctor(os_release, &["doctor", "--json"])).unwrap();
+        move |name: &str| {
+            json["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|check| check["name"] == name)
+                .unwrap_or_else(|| panic!("no {name} check"))
+                .clone()
+        }
+    };
+    let hint = |check: serde_json::Value| check["hint"].as_str().unwrap_or_default().to_string();
+
+    for (os_release, distribution, ffmpeg, adb) in [
+        (
+            "PRETTY_NAME=\"Ubuntu 24.04.3 LTS\"\nNAME=\"Ubuntu\"\nID=ubuntu\nID_LIKE=debian\n",
+            "Ubuntu 24.04.3 LTS",
+            "sudo apt install ffmpeg",
+            "sudo apt install adb",
+        ),
+        (
+            "NAME=\"Fedora Linux\"\nID=fedora\nPRETTY_NAME=\"Fedora Linux 42 (Workstation Edition)\"\n",
+            "Fedora Linux 42 (Workstation Edition)",
+            "sudo dnf install --allowerasing ffmpeg",
+            "sudo dnf install android-tools",
+        ),
+        (
+            "NAME=\"EndeavourOS\"\nPRETTY_NAME=\"EndeavourOS\"\nID=\"endeavouros\"\nID_LIKE=\"arch\"\n",
+            "EndeavourOS",
+            "sudo pacman -S --needed ffmpeg",
+            "sudo pacman -S --needed android-tools",
+        ),
+        (
+            "NAME=\"openSUSE Tumbleweed\"\nID=\"opensuse-tumbleweed\"\nID_LIKE=\"opensuse suse\"\nPRETTY_NAME=\"openSUSE Tumbleweed\"\n",
+            "openSUSE Tumbleweed",
+            "sudo zypper install --from packman ffmpeg",
+            "sudo zypper install android-tools",
+        ),
+        (
+            "NAME=NixOS\nID=nixos\nPRETTY_NAME=\"NixOS 25.05 (Warbler)\"\n",
+            "NixOS 25.05 (Warbler)",
+            "nix profile install nixpkgs#ffmpeg",
+            "nix profile install nixpkgs#android-tools",
+        ),
+    ] {
+        let check = checks(Some(os_release));
+        assert_eq!(check("distribution")["status"], "ok");
+        assert_eq!(check("distribution")["detail"], distribution);
+        let ffmpeg_hint = hint(check("ffmpeg"));
+        assert!(
+            ffmpeg_hint.contains(ffmpeg),
+            "{distribution}: {ffmpeg_hint}"
+        );
+        let ffprobe_hint = hint(check("ffprobe"));
+        assert!(
+            ffprobe_hint.contains(ffmpeg),
+            "{distribution}: {ffprobe_hint}"
+        );
+        let adb_hint = hint(check("adb"));
+        assert!(adb_hint.contains(adb), "{distribution}: {adb_hint}");
+    }
+
+    // A distribution without its own commands, and none at all.
+    let gentoo = checks(Some(
+        "NAME=Gentoo\nID=gentoo\nPRETTY_NAME=\"Gentoo Linux\"\n",
+    ));
+    assert_eq!(
+        gentoo("distribution")["detail"],
+        "Gentoo Linux, which the hints have no specific commands for"
+    );
+    assert!(hint(gentoo("ffmpeg")).starts_with("Install ffmpeg with the libx264 encoder"));
+    let unknown = checks(None);
+    assert_eq!(unknown("distribution")["status"], "skip");
+    assert!(!hint(unknown("adb")).contains("sudo"));
+
+    // Each step of a hint is on its own line in the report.
+    let report = doctor(
+        Some("ID=fedora\nPRETTY_NAME=\"Fedora Linux 42\"\n"),
+        &["doctor"],
+    );
+    assert!(
+        report.contains(
+            "\n       Fedora's own ffmpeg-free lacks libx264, so take ffmpeg from RPM Fusion:\n       sudo dnf install https://mirrors.rpmfusion.org/"
+        ),
+        "{report}"
+    );
+    assert!(
+        report.contains("\n       sudo dnf install --allowerasing ffmpeg\n"),
+        "{report}"
+    );
+}
+
+#[test]
 fn commands_needing_a_display_fail_without_one() {
     let sandbox = Sandbox::new();
     for args in [

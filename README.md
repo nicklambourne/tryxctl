@@ -43,12 +43,95 @@ static Linux binaries and Debian packages for x86_64 and aarch64.
   and ships the udev rules under `lib/udev/rules.d` for
   `services.udev.packages` on NixOS.
 
-Then add yourself to the `dialout` and `plugdev` groups and log in again; see
-[Device access on Linux](#device-access-on-linux) for why.
+Then install the dependencies, join the device groups, and run
+`tryxctl doctor`. It recognises Debian, Ubuntu, Fedora, Arch, openSUSE, NixOS,
+and their derivatives, and prints that distribution's commands for anything
+still missing.
 
-At runtime `tryxctl` needs `ffmpeg` with the `libx264` encoder and, for the
-legacy firmware, `adb` on the `PATH`. The Debian package recommends both, and
-`tryxctl doctor` reports anything missing.
+### Dependencies
+
+tryxctl runs `ffmpeg`, built with the `libx264` encoder, and `ffprobe` to
+check and convert media, and `adb` to transfer it to displays on the original
+cm01 firmware. The Debian package recommends them and the Nix package brings
+its own. Otherwise, install them from your distribution.
+
+Debian, Ubuntu, and derivatives such as Linux Mint and Pop!_OS:
+
+```bash
+sudo apt install ffmpeg adb
+```
+
+Fedora's own `ffmpeg-free` lacks `libx264`, so take `ffmpeg` from
+[RPM Fusion](https://rpmfusion.org/Configuration):
+
+```bash
+sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm
+sudo dnf install --allowerasing ffmpeg android-tools
+```
+
+Arch Linux and derivatives such as Manjaro and EndeavourOS:
+
+```bash
+sudo pacman -S --needed ffmpeg android-tools
+```
+
+openSUSE's own `ffmpeg` lacks `libx264` too, so take it from
+[Packman](https://packman.links2linux.de/). These commands are for Tumbleweed;
+on Leap, use `openSUSE_Leap_$releasever` in place of `openSUSE_Tumbleweed`:
+
+```bash
+sudo zypper addrepo -cfp 90 'https://ftp.gwdg.de/pub/linux/misc/packman/suse/openSUSE_Tumbleweed/' packman
+sudo zypper refresh
+sudo zypper dist-upgrade --from packman --allow-vendor-change
+sudo zypper install --from packman ffmpeg
+sudo zypper install android-tools
+```
+
+NixOS, in `configuration.nix`, if you run the tarball's binary rather than
+the flake's package:
+
+```nix
+environment.systemPackages = with pkgs; [ ffmpeg android-tools ];
+```
+
+### Device groups
+
+The display's device nodes belong to groups: the serial port and ADB
+interface of the original cm01 firmware to `dialout` and `plugdev`, and a
+KANALI display to `lp`. Join all three to cover either firmware; see
+[Device access on Linux](#device-access-on-linux) for why they are needed.
+
+Debian, Ubuntu, and derivatives:
+
+```bash
+sudo usermod -aG dialout,plugdev,lp "$USER"
+```
+
+Fedora, openSUSE, and other distributions that may have no `plugdev` group.
+`groupadd -f` creates it only when it is missing:
+
+```bash
+sudo groupadd -f --system plugdev
+sudo usermod -aG dialout,plugdev,lp "$USER"
+```
+
+Arch Linux and derivatives, where serial ports belong to `uucp` instead:
+
+```bash
+sudo groupadd -f --system plugdev
+sudo usermod -aG uucp,plugdev,lp "$USER"
+```
+
+NixOS, in `configuration.nix`, with your user name in place of `alice`:
+
+```nix
+users.groups.plugdev = { };
+users.users.alice.extraGroups = [ "dialout" "plugdev" "lp" ];
+```
+
+Log out and back in for the groups to apply, and replug the display if you
+created `plugdev`, so the udev rule can hand it the device. `id -nG` lists
+the groups a new login shell is in.
 
 ### Which firmware does my display run?
 
@@ -245,10 +328,10 @@ connected displays.
 - **No display is found.** Check the cable, then run `tryxctl devices`. If the
   display is listed but access fails, install the udev rules, reload them with
   `sudo udevadm control --reload-rules`, and replug the display.
-- **Permission denied on the serial port or USB device.** Add yourself to
-  `dialout` and `plugdev` and log in again. The daemon runs under your systemd
-  user manager, which keeps the groups it started with, so log out fully, or
-  run `systemctl --user exit` and log back in.
+- **Permission denied on the serial port or USB device.** Join the
+  [device groups](#device-groups) and log in again. The daemon runs under your
+  systemd user manager, which keeps the groups it started with, so log out
+  fully, or run `systemctl --user exit` and log back in.
 - **adb reports "no permissions".** An adb server started before the udev rule
   was installed keeps the old permissions. Run `adb kill-server` and try again.
 - **The panel goes dark after about a minute.** Nothing is keeping it awake.
@@ -281,9 +364,9 @@ Media you uploaded stays on the display. Remove it first with
 ## Device access on Linux
 
 Displays on the original `cm01` firmware expose a serial port owned by
-`dialout`, plus an ADB interface that the `71-tryx-legacy.rules` udev rule
-opens to `plugdev`. Printer-class (KANALI) displays need the other two rules,
-or membership of the `lp` group.
+`dialout` (`uucp` on Arch), plus an ADB interface that the
+`71-tryx-legacy.rules` udev rule opens to `plugdev`. Printer-class (KANALI)
+displays need the other two rules, or membership of the `lp` group.
 
 ## Contributing
 

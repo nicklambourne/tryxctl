@@ -1,6 +1,7 @@
 mod daemon;
 mod devices;
 mod display;
+mod distro;
 mod doctor;
 mod exit;
 mod info;

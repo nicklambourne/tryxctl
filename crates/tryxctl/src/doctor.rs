@@ -1,3 +1,4 @@
+use crate::distro::{self, Distro, Family};
 use crate::exit;
 use crate::output::{self, Status};
 use serde::Serialize;
@@ -21,12 +22,15 @@ struct Report {
 }
 
 pub fn run(json: bool) -> anyhow::Result<ExitCode> {
+    let distro = distro::detect();
+    let family = distro.as_ref().and_then(|distro| distro.family);
     let mut checks = Vec::new();
-    check_ffmpeg(&mut checks);
-    check_ffprobe(&mut checks);
-    check_adb(&mut checks);
-    check_permissions(&mut checks);
-    check_devices(&mut checks);
+    check_distro(&mut checks, distro.as_ref());
+    check_ffmpeg(&mut checks, family);
+    check_ffprobe(&mut checks, family);
+    check_adb(&mut checks, family);
+    check_permissions(&mut checks, family);
+    check_devices(&mut checks, family);
 
     let ok = !checks.iter().any(|check| check.status == Status::Fail);
     if json {
@@ -34,8 +38,9 @@ pub fn run(json: bool) -> anyhow::Result<ExitCode> {
     } else {
         for check in &checks {
             println!("{} {}: {}", check.status.badge(), check.name, check.detail);
-            if let Some(hint) = &check.hint {
-                println!("       {}", output::dim(hint));
+            // A hint of several steps has one per line.
+            for line in check.hint.iter().flat_map(|hint| hint.lines()) {
+                println!("       {}", output::dim(line));
             }
         }
         println!();
@@ -60,13 +65,29 @@ fn check(name: &str, status: Status, detail: impl Into<String>, hint: Option<&st
     }
 }
 
-fn check_ffmpeg(checks: &mut Vec<Check>) {
+fn check_distro(checks: &mut Vec<Check>, distro: Option<&Distro>) {
+    checks.push(match distro {
+        Some(Distro {
+            name,
+            family: Some(_),
+        }) => check("distribution", Status::Ok, name.as_str(), None),
+        Some(Distro { name, family: None }) => check(
+            "distribution",
+            Status::Ok,
+            format!("{name}, which the hints have no specific commands for"),
+            None,
+        ),
+        None => check("distribution", Status::Skip, "no os-release to read", None),
+    });
+}
+
+fn check_ffmpeg(checks: &mut Vec<Check>, family: Option<Family>) {
     let Ok(path) = which::which("ffmpeg") else {
         checks.push(check(
             "ffmpeg",
             Status::Fail,
             "not found on PATH",
-            Some("Install ffmpeg with the libx264 encoder (the nix shell provides it)."),
+            Some(&install_ffmpeg(family)),
         ));
         checks.push(check(
             "libx264 encoder",
@@ -94,9 +115,7 @@ fn check_ffmpeg(checks: &mut Vec<Check>) {
             "libx264 encoder",
             Status::Fail,
             "this ffmpeg build cannot encode H.264",
-            Some(
-                "Fedora's ffmpeg-free lacks libx264: enable RPM Fusion and install the full ffmpeg package.",
-            ),
+            Some(&install_libx264(family)),
         )),
         None => checks.push(check(
             "libx264 encoder",
@@ -107,7 +126,7 @@ fn check_ffmpeg(checks: &mut Vec<Check>) {
     }
 }
 
-fn check_ffprobe(checks: &mut Vec<Check>) {
+fn check_ffprobe(checks: &mut Vec<Check>, family: Option<Family>) {
     match which::which("ffprobe") {
         Ok(path) => checks.push(check(
             "ffprobe",
@@ -119,53 +138,166 @@ fn check_ffprobe(checks: &mut Vec<Check>) {
             "ffprobe",
             Status::Fail,
             "not found on PATH",
-            Some("ffprobe ships with ffmpeg; install the same package."),
+            Some(&format!(
+                "ffprobe ships with ffmpeg; install the same package.\n{}",
+                install_ffmpeg(family)
+            )),
         )),
     }
 }
 
-fn check_adb(checks: &mut Vec<Check>) {
+fn check_adb(checks: &mut Vec<Check>, family: Option<Family>) {
     match which::which("adb") {
         Ok(path) => checks.push(check("adb", Status::Ok, path.display().to_string(), None)),
         Err(_) => checks.push(check(
             "adb",
             Status::Warn,
             "not found on PATH; needed to transfer media on the legacy cm01 firmware",
-            Some("Install android-tools (the nix shell provides it on Linux)."),
+            Some(install_adb(family)),
         )),
     }
 }
 
+const RPM_FUSION: &str = "sudo dnf install https://mirrors.rpmfusion.org/free/fedora/rpmfusion-free-release-$(rpm -E %fedora).noarch.rpm";
+
+/// How to install ffmpeg with the libx264 encoder.
+fn install_ffmpeg(family: Option<Family>) -> String {
+    match family {
+        Some(Family::Debian) => "sudo apt install ffmpeg".to_string(),
+        Some(Family::Fedora) => format!(
+            "Fedora's own ffmpeg-free lacks libx264, so take ffmpeg from RPM Fusion:\n{RPM_FUSION}\nsudo dnf install --allowerasing ffmpeg"
+        ),
+        Some(Family::Arch) => "sudo pacman -S --needed ffmpeg".to_string(),
+        Some(family @ (Family::OpenSuseTumbleweed | Family::OpenSuseLeap)) => format!(
+            "openSUSE's own ffmpeg lacks libx264, so take ffmpeg from Packman:\n{}\nsudo zypper install --from packman ffmpeg",
+            add_packman(family)
+        ),
+        Some(Family::NixOs) => {
+            "Add ffmpeg to environment.systemPackages, or run: nix profile install nixpkgs#ffmpeg"
+                .to_string()
+        }
+        None => "Install ffmpeg with the libx264 encoder (the nix shell provides it).".to_string(),
+    }
+}
+
+/// What to do about an ffmpeg that cannot encode H.264.
+fn install_libx264(family: Option<Family>) -> String {
+    match family {
+        Some(Family::Fedora) => format!(
+            "Fedora's own ffmpeg-free lacks libx264, so swap it for RPM Fusion's ffmpeg:\n{RPM_FUSION}\nsudo dnf swap ffmpeg-free ffmpeg --allowerasing"
+        ),
+        Some(Family::OpenSuseTumbleweed | Family::OpenSuseLeap) => install_ffmpeg(family),
+        Some(_) => format!(
+            "The distribution's ffmpeg has libx264; install it and put it first on PATH.\n{}",
+            install_ffmpeg(family)
+        ),
+        None => "Install an ffmpeg build with the libx264 encoder; Fedora's ffmpeg-free and openSUSE's own ffmpeg lack it.".to_string(),
+    }
+}
+
+/// The commands that add the Packman repository and move the multimedia
+/// packages already installed over to it.
+fn add_packman(family: Family) -> String {
+    let release = match family {
+        Family::OpenSuseLeap => "openSUSE_Leap_$releasever",
+        _ => "openSUSE_Tumbleweed",
+    };
+    format!(
+        "sudo zypper addrepo -cfp 90 'https://ftp.gwdg.de/pub/linux/misc/packman/suse/{release}/' packman\nsudo zypper refresh\nsudo zypper dist-upgrade --from packman --allow-vendor-change"
+    )
+}
+
+/// How to install adb.
+fn install_adb(family: Option<Family>) -> &'static str {
+    match family {
+        Some(Family::Debian) => "sudo apt install adb",
+        Some(Family::Fedora) => "sudo dnf install android-tools",
+        Some(Family::Arch) => "sudo pacman -S --needed android-tools",
+        Some(Family::OpenSuseTumbleweed | Family::OpenSuseLeap) => {
+            "sudo zypper install android-tools"
+        }
+        Some(Family::NixOs) => {
+            "Add android-tools to environment.systemPackages, or run: nix profile install nixpkgs#android-tools"
+        }
+        None => "Install android-tools (the nix shell provides it on Linux).",
+    }
+}
+
+/// How to install the udev rules in `files`.
+#[cfg(any(target_os = "linux", test))]
+fn install_udev_rules(family: Option<Family>, files: &str) -> String {
+    match family {
+        Some(Family::NixOs) => "Add the tryxctl package to services.udev.packages, run sudo nixos-rebuild switch, and replug the display.".to_string(),
+        _ => format!(
+            "Copy {files} (in udev/ in the release tarball, packaging/udev/ in the source) into /etc/udev/rules.d, run sudo udevadm control --reload-rules, and replug the display."
+        ),
+    }
+}
+
+/// The groups that may own serial ports, likeliest first: Arch gives them to
+/// uucp, the others to dialout.
+fn serial_groups(family: Option<Family>) -> [&'static str; 2] {
+    match family {
+        Some(Family::Arch) => ["uucp", "dialout"],
+        _ => ["dialout", "uucp"],
+    }
+}
+
+/// How `user` joins `group`, creating the group first when the system has
+/// none by that name. NixOS declares both in its configuration.
+fn join_group(family: Option<Family>, group: &str, exists: bool, user: &str) -> String {
+    match (family, exists) {
+        (Some(Family::NixOs), _) => format!(
+            "Add to configuration.nix, run sudo nixos-rebuild switch, then log in again:\n{}users.users.{user}.extraGroups = [ \"{group}\" ];",
+            if exists {
+                String::new()
+            } else {
+                format!("users.groups.{group} = {{ }};\n")
+            }
+        ),
+        (_, true) => format!("sudo usermod -aG {group} $USER, then log in again."),
+        (_, false) => format!(
+            "sudo groupadd --system {group}\nsudo usermod -aG {group} $USER\nThen log in again and replug the display."
+        ),
+    }
+}
+
 #[cfg(target_os = "linux")]
-fn check_permissions(checks: &mut Vec<Check>) {
+fn check_permissions(checks: &mut Vec<Check>, family: Option<Family>) {
     push_udev_check(
         checks,
         "udev rule (printer-class)",
         &["391a"],
         "vendor 391a",
-        "Copy packaging/udev/70-tryx-access.rules and 99-tryx-printer.rules into /etc/udev/rules.d and replug the display.",
+        &install_udev_rules(family, "70-tryx-access.rules and 99-tryx-printer.rules"),
     );
     push_udev_check(
         checks,
         "udev rule (legacy cm01)",
         &["cm01", "18d1"],
         "the legacy cm01 device",
-        "Copy packaging/udev/71-tryx-legacy.rules into /etc/udev/rules.d and replug the display; adb needs it.",
+        &format!(
+            "adb needs this rule. {}",
+            install_udev_rules(family, "71-tryx-legacy.rules")
+        ),
     );
     push_group_check(
         checks,
+        family,
         "lp group",
         &["lp"],
         "printer-class USB access without a seat ACL (SSH sessions have none)",
     );
     push_group_check(
         checks,
+        family,
         "serial group",
-        &["dialout", "uucp"],
+        &serial_groups(family),
         "the legacy firmware's /dev/ttyACM* command port",
     );
     push_group_check(
         checks,
+        family,
         "plugdev group",
         &["plugdev"],
         "the legacy udev rule's ADB access without a seat ACL",
@@ -197,7 +329,13 @@ fn push_udev_check(
 }
 
 #[cfg(target_os = "linux")]
-fn push_group_check(checks: &mut Vec<Check>, name: &str, groups: &[&str], purpose: &str) {
+fn push_group_check(
+    checks: &mut Vec<Check>,
+    family: Option<Family>,
+    name: &str,
+    groups: &[&str],
+    purpose: &str,
+) {
     match user_in_any_group(groups) {
         Ok(Some(group)) => checks.push(check(
             name,
@@ -212,10 +350,7 @@ fn push_group_check(checks: &mut Vec<Check>, name: &str, groups: &[&str], purpos
                 "current user is in none of {}; needed for {purpose}",
                 groups.join("/")
             ),
-            Some(&format!(
-                "sudo usermod -aG {} $USER, then log in again.",
-                groups[0]
-            )),
+            Some(&join_any_group(family, groups)),
         )),
         Err(error) => checks.push(check(
             name,
@@ -224,6 +359,31 @@ fn push_group_check(checks: &mut Vec<Check>, name: &str, groups: &[&str], purpos
             None,
         )),
     }
+}
+
+/// How to join the first of `groups` this system has, or to create the first
+/// when it has none of them.
+#[cfg(target_os = "linux")]
+fn join_any_group(family: Option<Family>, groups: &[&str]) -> String {
+    let existing = groups
+        .iter()
+        .copied()
+        .find(|name| nix::unistd::Group::from_name(name).ok().flatten().is_some());
+    let user = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .ok()
+        .flatten()
+        .map_or_else(|| "$USER".to_string(), |user| user.name);
+    join_group(
+        family,
+        existing.unwrap_or(groups[0]),
+        existing.is_some(),
+        &user,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn join_any_group(family: Option<Family>, groups: &[&str]) -> String {
+    join_group(family, groups[0], true, "$USER")
 }
 
 #[cfg(target_os = "linux")]
@@ -269,7 +429,7 @@ fn find_udev_rule(needles: &[&str]) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn check_permissions(checks: &mut Vec<Check>) {
+fn check_permissions(checks: &mut Vec<Check>, _family: Option<Family>) {
     for name in [
         "udev rule (printer-class)",
         "udev rule (legacy cm01)",
@@ -281,7 +441,7 @@ fn check_permissions(checks: &mut Vec<Check>) {
     }
 }
 
-fn check_devices(checks: &mut Vec<Check>) {
+fn check_devices(checks: &mut Vec<Check>, family: Option<Family>) {
     let discovery = match tryx_device::discover() {
         Ok(discovery) => discovery,
         Err(error) => {
@@ -311,10 +471,10 @@ fn check_devices(checks: &mut Vec<Check>) {
         ));
         return;
     }
-    push_device_checks(checks, &discovery);
+    push_device_checks(checks, &discovery, family);
 }
 
-fn push_device_checks(checks: &mut Vec<Check>, discovery: &Discovery) {
+fn push_device_checks(checks: &mut Vec<Check>, discovery: &Discovery, family: Option<Family>) {
     for device in &discovery.printer_devices {
         let name = format!("device {}", device.id);
         let label = match device.product {
@@ -383,7 +543,7 @@ fn push_device_checks(checks: &mut Vec<Check>, discovery: &Discovery) {
                 &name,
                 Status::Fail,
                 format!("{label}: permission denied on {tty}"),
-                Some("Join the dialout (or uucp) group, then log in again."),
+                Some(&join_any_group(family, &serial_groups(family))),
             )),
             (Some(tty), Some(access)) => checks.push(check(
                 &name,
@@ -453,5 +613,93 @@ mod tests {
         assert!(!has_video_encoder(ENCODERS, "aac"));
         assert!(!has_video_encoder(ENCODERS, "libx265"));
         assert!(!has_video_encoder("", "libx264"));
+    }
+
+    #[test]
+    fn install_hints_use_the_distribution_s_packages() {
+        assert_eq!(
+            install_ffmpeg(Some(Family::Debian)),
+            "sudo apt install ffmpeg"
+        );
+        assert_eq!(install_adb(Some(Family::Debian)), "sudo apt install adb");
+        assert_eq!(
+            install_ffmpeg(Some(Family::Arch)),
+            "sudo pacman -S --needed ffmpeg"
+        );
+        assert_eq!(
+            install_adb(Some(Family::Arch)),
+            "sudo pacman -S --needed android-tools"
+        );
+        assert_eq!(
+            install_adb(Some(Family::Fedora)),
+            "sudo dnf install android-tools"
+        );
+        assert_eq!(
+            install_adb(Some(Family::OpenSuseLeap)),
+            "sudo zypper install android-tools"
+        );
+
+        let fedora = install_ffmpeg(Some(Family::Fedora));
+        let steps: Vec<&str> = fedora.lines().skip(1).collect();
+        assert_eq!(
+            steps,
+            [RPM_FUSION, "sudo dnf install --allowerasing ffmpeg"]
+        );
+        assert!(
+            install_libx264(Some(Family::Fedora))
+                .ends_with("\nsudo dnf swap ffmpeg-free ffmpeg --allowerasing")
+        );
+
+        let tumbleweed = install_ffmpeg(Some(Family::OpenSuseTumbleweed));
+        assert!(tumbleweed.contains("/packman/suse/openSUSE_Tumbleweed/' packman\n"));
+        assert!(tumbleweed.ends_with("\nsudo zypper install --from packman ffmpeg"));
+        assert!(
+            install_ffmpeg(Some(Family::OpenSuseLeap)).contains("/openSUSE_Leap_$releasever/'")
+        );
+        assert_eq!(
+            install_libx264(Some(Family::OpenSuseLeap)),
+            install_ffmpeg(Some(Family::OpenSuseLeap))
+        );
+
+        assert!(install_ffmpeg(Some(Family::NixOs)).contains("environment.systemPackages"));
+        assert!(
+            install_libx264(Some(Family::Arch))
+                .ends_with("first on PATH.\nsudo pacman -S --needed ffmpeg")
+        );
+        assert!(install_ffmpeg(None).starts_with("Install ffmpeg with the libx264 encoder"));
+        assert!(!install_adb(None).contains("sudo"));
+    }
+
+    #[test]
+    fn udev_hints_name_the_rules_or_the_nixos_option() {
+        assert!(
+            install_udev_rules(Some(Family::NixOs), "71-tryx-legacy.rules")
+                .contains("services.udev.packages")
+        );
+        let copy = install_udev_rules(Some(Family::Fedora), "71-tryx-legacy.rules");
+        assert!(
+            copy.starts_with("Copy 71-tryx-legacy.rules (in udev/"),
+            "{copy}"
+        );
+        assert!(copy.contains("sudo udevadm control --reload-rules"));
+    }
+
+    #[test]
+    fn group_hints_create_missing_groups() {
+        assert_eq!(serial_groups(Some(Family::Arch))[0], "uucp");
+        assert_eq!(serial_groups(Some(Family::Fedora))[0], "dialout");
+        assert_eq!(serial_groups(None)[0], "dialout");
+        assert_eq!(
+            join_group(Some(Family::Debian), "dialout", true, "alice"),
+            "sudo usermod -aG dialout $USER, then log in again."
+        );
+        assert_eq!(
+            join_group(Some(Family::Fedora), "plugdev", false, "alice"),
+            "sudo groupadd --system plugdev\nsudo usermod -aG plugdev $USER\nThen log in again and replug the display."
+        );
+        let nixos = join_group(Some(Family::NixOs), "plugdev", false, "alice");
+        assert!(nixos.contains("\nusers.groups.plugdev = { };\n"), "{nixos}");
+        assert!(nixos.ends_with("users.users.alice.extraGroups = [ \"plugdev\" ];"));
+        assert!(!join_group(Some(Family::NixOs), "lp", true, "alice").contains("users.groups"));
     }
 }

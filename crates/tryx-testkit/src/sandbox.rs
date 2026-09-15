@@ -1,6 +1,6 @@
 //! A throwaway directory standing in for everything tryxctl reads from its
-//! environment: the XDG directories, the temporary directory, `PATH`, and
-//! the USB device tree.
+//! environment: the XDG directories, the temporary directory, `PATH`, the
+//! USB device tree, and os-release.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -94,6 +94,12 @@ impl Sandbox {
         self.root.join("dev").join(tty)
     }
 
+    /// The os-release tryxctl reads to tell which distribution it runs on.
+    /// There is none until a test writes one.
+    pub fn os_release(&self) -> PathBuf {
+        self.root.join("os-release")
+    }
+
     /// The variables that confine tryxctl to the sandbox. The host's `PATH`
     /// follows the sandbox's own bin directory, for ffmpeg.
     pub fn vars(&self) -> Vec<(&'static str, OsString)> {
@@ -112,6 +118,7 @@ impl Sandbox {
             ("TMPDIR", dir("tmp")),
             ("TRYXCTL_SYSFS_USB_DEVICES", dir("sys")),
             ("TRYXCTL_DEV_DIR", dir("dev")),
+            ("TRYXCTL_OS_RELEASE", self.os_release().into_os_string()),
             ("PATH", path),
         ]
     }
