@@ -3,7 +3,7 @@
 //! since a redraw only rewrites the cells that changed.
 
 use serialport::TTYPort;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -63,22 +63,37 @@ impl Terminal {
         let screen = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, 0)));
         let stop = Arc::new(AtomicBool::new(false));
         let reader = {
-            let mut master = master.try_clone_native().expect("a reading handle");
+            let master = master.try_clone_native().expect("a reading handle");
             let output = output.clone();
             let screen = screen.clone();
             let stop = stop.clone();
             std::thread::spawn(move || {
                 let mut chunk = [0u8; 8192];
                 while !stop.load(Ordering::Relaxed) {
-                    match master.read(&mut chunk) {
-                        Ok(0) => std::thread::sleep(Duration::from_millis(10)),
-                        Ok(count) => {
-                            output.lock().unwrap().extend_from_slice(&chunk[..count]);
-                            screen.lock().unwrap().process(&chunk[..count]);
-                        }
-                        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
-                        // The program exited and closed the terminal.
-                        Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                    // Not TTYPort's own read, which gives up on a terminal
+                    // that has hung up even while the program's last output
+                    // is still waiting in it: a program that prints and exits
+                    // before this thread wakes leaves both conditions at once.
+                    let mut ready = libc::pollfd {
+                        fd: master.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: one pollfd, for a descriptor `master` keeps open.
+                    unsafe { libc::poll(&mut ready, 1, 50) };
+                    let count = if ready.revents & libc::POLLIN != 0 {
+                        // SAFETY: reads at most `chunk.len()` bytes into `chunk`.
+                        unsafe { libc::read(ready.fd, chunk.as_mut_ptr().cast(), chunk.len()) }
+                    } else {
+                        0
+                    };
+                    if count > 0 {
+                        let read = &chunk[..count as usize];
+                        output.lock().unwrap().extend_from_slice(read);
+                        screen.lock().unwrap().process(read);
+                    } else if ready.revents != 0 {
+                        // The program exited and everything it wrote is read.
+                        std::thread::sleep(Duration::from_millis(10));
                     }
                 }
             })
